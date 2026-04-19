@@ -1,0 +1,47 @@
+settings:
+  - name: convoprobe_api_token
+    type: secret-input
+    required: true
+    label:
+      en_US: ConvoProbe API Token
+      ja_JP: ConvoProbe APIトークン
+    placeholder:
+      en_US: cp_xxxxxxxx...
+      ja_JP: cp_xxxxxxxx...
+    help:
+      en_US: Issue a token from ConvoProbe Web UI -> Settings -> Plugin
+      ja_JP: ConvoProbe Web UI の 設定 → Plugin から発行してください
+  - name: target_app
+    type: app-selector
+    scope: chat
+    required: true
+    label:
+      en_US: Target Chatbot
+      ja_JP: テスト対象チャットボット
+    help:
+      en_US: Select the chatbot in this workspace to test
+      ja_JP: このワークスペース内のテスト対象チャットボットを選択してください
+  - name: judge_llm_api_key
+    type: secret-input
+    required: false
+    label:
+      en_US: Judge LLM API Key (optional fallback)
+      ja_JP: 判定用LLM APIキー（任意・フォールバック用）
+    help:
+      en_US: Leave empty to use Dify workspace's model provider for evaluation. Set only as fallback.
+      ja_JP: 空欄のままだと、Difyワークスペースに登録済みのモデルプロバイダを判定に利用します。フォールバック用途のみ設定してください。
+  - name: convoprobe_api_base_url
+    type: text-input
+    required: false
+    label:
+      en_US: ConvoProbe API Base URL (advanced)
+      ja_JP: ConvoProbe API ベースURL（詳細）
+    placeholder:
+      en_US: https://convoprobe.vercel.app
+      ja_JP: https://convoprobe.vercel.app
+    help:
+      en_US: Defaults to ConvoProbe SaaS. Set only for self-hosted deployments.
+      ja_JP: 通常は ConvoProbe SaaS が利用されます。セルフホスト時のみ設定してください。
+endpoints:
+  - endpoints/run.yaml
+  - endpoints/health.yaml

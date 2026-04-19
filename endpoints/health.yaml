@@ -1,0 +1,5 @@
+path: /health
+method: GET
+extra:
+  python:
+    source: endpoints/health.py

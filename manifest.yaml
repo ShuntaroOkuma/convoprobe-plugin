@@ -1,7 +1,7 @@
 version: 0.0.1
 type: plugin
 author: shuntaro-okuma
-name: convoprobe
+name: convoprobe-qa
 label:
   en_US: ConvoProbe
   ja_JP: ConvoProbe
@@ -32,6 +32,4 @@ meta:
     version: "3.12"
     entrypoint: main
 created_at: "2026-04-19T15:00:00Z"
-privacy: PRIVACY.md
-tags:
-  - productivity
+

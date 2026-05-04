@@ -21,15 +21,10 @@ settings:
     help:
       en_US: Select the chatbot in this workspace to test
       ja_JP: このワークスペース内のテスト対象チャットボットを選択してください
-  - name: judge_llm_api_key
-    type: secret-input
-    required: false
-    label:
-      en_US: Judge LLM API Key (optional fallback)
-      ja_JP: 判定用LLM APIキー（任意・フォールバック用）
-    help:
-      en_US: Leave empty to use Dify workspace's model provider for evaluation. Set only as fallback.
-      ja_JP: 空欄のままだと、Difyワークスペースに登録済みのモデルプロバイダを判定に利用します。フォールバック用途のみ設定してください。
+  # judge_llm_api_key removed 2026-05-04 — Option C (Reverse Invocation
+  # session.model.llm.invoke) confirmed in production. Judge LLM uses the user's
+  # Dify Workspace provider directly; no extra setting needed. See architecture
+  # ADR-007 and research/dify-plugin-day2-findings.md.
   - name: convoprobe_api_base_url
     type: text-input
     required: false
@@ -45,3 +40,4 @@ settings:
 endpoints:
   - endpoints/run.yaml
   - endpoints/health.yaml
+  - endpoints/verify.yaml

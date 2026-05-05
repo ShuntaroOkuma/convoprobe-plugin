@@ -57,6 +57,14 @@ class RunDescriptor:
 class BackendClient:
     """Thin synchronous HTTP client. Methods correspond 1:1 to the
     Plugin-internal endpoints in plugin_internal_handlers.go.
+
+    Holds a persistent ``httpx.Client`` so a single run (1 create_run +
+    N record_turn + 1 complete_run) reuses one TCP/TLS connection
+    instead of paying handshake cost per call. Callers should ``close()``
+    when done; the class is also a context manager. ``httpx.Client``
+    itself is thread-safe per upstream docs, which matches the run
+    loop pattern (descriptor fetched on the request thread, turns
+    posted from the daemon thread).
     """
 
     def __init__(
@@ -64,12 +72,28 @@ class BackendClient:
         token: str,
         base_url: str | None = None,
         timeout_seconds: float = DEFAULT_HTTP_TIMEOUT_SECONDS,
+        *,
+        _client: httpx.Client | None = None,
     ):
         if not token:
             raise ValueError("token is required")
         self._token = token
         self._base = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        self._timeout = timeout_seconds
+        # _client is intentionally underscore-prefixed: production callers
+        # should let us own the lifecycle. Tests inject one with a
+        # MockTransport for in-memory routing.
+        self._client = _client if _client is not None else httpx.Client(timeout=timeout_seconds)
+
+    def close(self) -> None:
+        """Release the underlying connection pool. Safe to call multiple
+        times; httpx.Client.close() is idempotent."""
+        self._client.close()
+
+    def __enter__(self) -> "BackendClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     # --- public surface ----------------------------------------------------
 
@@ -166,12 +190,11 @@ class BackendClient:
         url = self._base + path
         headers = {"Authorization": f"Bearer {self._token}"}
         try:
-            resp = httpx.request(
+            resp = self._client.request(
                 method,
                 url,
                 headers=headers,
                 json=json_body,
-                timeout=self._timeout,
             )
         except httpx.HTTPError as e:
             raise BackendClientError(

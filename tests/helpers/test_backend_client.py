@@ -1,11 +1,9 @@
 """Unit tests for helpers/backend_client.BackendClient.
 
-Uses httpx.MockTransport for all HTTP calls — no network. The
-production client constructs a fresh request per call (no Client
-instance), so we monkeypatch httpx.request to route through our
-transport. This keeps the production code idiomatic (one-shot
-requests, no client lifecycle to manage) while still making it
-fully testable.
+Uses httpx.MockTransport for all HTTP calls — no network. Production
+holds a persistent httpx.Client for connection pooling; tests inject
+a Client backed by MockTransport via the underscore-prefixed `_client`
+constructor parameter.
 """
 from __future__ import annotations
 
@@ -27,10 +25,13 @@ from helpers.backend_client import (
 TOKEN = "cp_aabbccdd11223344556677889900aabbccdd11223344556677889900aabbcc"
 
 
-def _patch_httpx(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Request], httpx.Response]) -> list[httpx.Request]:
-    """Replace httpx.request with a transport-backed shim. Returns a
-    captured list of every request the test caused so assertions can
-    inspect headers, bodies, and URLs.
+def _make_client(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    base_url: str = "https://api.example.com",
+) -> tuple[BackendClient, list[httpx.Request]]:
+    """Construct a BackendClient whose persistent httpx.Client routes
+    through MockTransport. Returns (client, captured_requests).
     """
     captured: list[httpx.Request] = []
 
@@ -38,16 +39,9 @@ def _patch_httpx(monkeypatch: pytest.MonkeyPatch, handler: Callable[[httpx.Reque
         captured.append(request)
         return handler(request)
 
-    transport = httpx.MockTransport(_route)
-
-    def _request(method: str, url: str, **kwargs) -> httpx.Response:
-        # MockTransport requires we build the request through a Client
-        # so it picks up the transport. Cheap to instantiate per call.
-        with httpx.Client(transport=transport) as client:
-            return client.request(method, url, **kwargs)
-
-    monkeypatch.setattr("helpers.backend_client.httpx.request", _request)
-    return captured
+    httpx_client = httpx.Client(transport=httpx.MockTransport(_route))
+    backend = BackendClient(token=TOKEN, base_url=base_url, _client=httpx_client)
+    return backend, captured
 
 
 # --- constructor ------------------------------------------------------------
@@ -69,12 +63,10 @@ def test_constructor_defaults_base_url():
 
 # --- health -----------------------------------------------------------------
 
-def test_health_sends_bearer_and_returns_payload(monkeypatch: pytest.MonkeyPatch):
-    captured = _patch_httpx(
-        monkeypatch,
+def test_health_sends_bearer_and_returns_payload():
+    client, captured = _make_client(
         lambda r: httpx.Response(200, json={"status": "ok", "checked_at": "2026-05-05T00:00:00Z"}),
     )
-    client = BackendClient(token=TOKEN, base_url="https://api.example.com")
     body = client.health()
 
     assert body["status"] == "ok"
@@ -87,7 +79,7 @@ def test_health_sends_bearer_and_returns_payload(monkeypatch: pytest.MonkeyPatch
 
 # --- create_run -------------------------------------------------------------
 
-def test_create_run_happy_path(monkeypatch: pytest.MonkeyPatch):
+def test_create_run_happy_path():
     payload = {
         "run_id": "11111111-1111-1111-1111-111111111111",
         "scenario_id": "22222222-2222-2222-2222-222222222222",
@@ -97,12 +89,7 @@ def test_create_run_happy_path(monkeypatch: pytest.MonkeyPatch):
         ],
         "config": {"max_turn_seconds": 60, "total_timeout_seconds": 600},
     }
-    captured = _patch_httpx(
-        monkeypatch,
-        lambda r: httpx.Response(201, json=payload),
-    )
-
-    client = BackendClient(token=TOKEN, base_url="https://api.example.com")
+    client, captured = _make_client(lambda r: httpx.Response(201, json=payload))
     descriptor = client.create_run("22222222-2222-2222-2222-222222222222")
 
     assert isinstance(descriptor, RunDescriptor)
@@ -117,11 +104,10 @@ def test_create_run_happy_path(monkeypatch: pytest.MonkeyPatch):
     assert body == {"scenario_id": "22222222-2222-2222-2222-222222222222"}
 
 
-def test_create_run_descriptor_is_frozen(monkeypatch: pytest.MonkeyPatch):
+def test_create_run_descriptor_is_frozen():
     """A frozen dataclass would prevent the run loop from corrupting
     the step list mid-iteration. Pin the immutability."""
-    _patch_httpx(
-        monkeypatch,
+    client, _ = _make_client(
         lambda r: httpx.Response(
             201,
             json={
@@ -133,40 +119,36 @@ def test_create_run_descriptor_is_frozen(monkeypatch: pytest.MonkeyPatch):
             },
         ),
     )
-    descriptor = BackendClient(token=TOKEN).create_run("22222222-2222-2222-2222-222222222222")
+    descriptor = client.create_run("22222222-2222-2222-2222-222222222222")
     with pytest.raises((AttributeError, TypeError)):
         descriptor.run_id = "other"  # type: ignore[misc]
 
 
-def test_create_run_raises_on_missing_keys(monkeypatch: pytest.MonkeyPatch):
-    _patch_httpx(
-        monkeypatch,
+def test_create_run_raises_on_missing_keys():
+    client, _ = _make_client(
         lambda r: httpx.Response(201, json={"run_id": "x", "scenario_id": "y"}),  # missing max_turns/steps/config
     )
     with pytest.raises(BackendClientError) as exc_info:
-        BackendClient(token=TOKEN).create_run("22222222-2222-2222-2222-222222222222")
+        client.create_run("22222222-2222-2222-2222-222222222222")
     assert "unexpected response shape" in str(exc_info.value)
 
 
-def test_create_run_4xx_propagates_status(monkeypatch: pytest.MonkeyPatch):
-    _patch_httpx(
-        monkeypatch,
+def test_create_run_4xx_propagates_status():
+    client, _ = _make_client(
         lambda r: httpx.Response(404, json={"error": "scenario not found"}),
     )
     with pytest.raises(BackendClientError) as exc_info:
-        BackendClient(token=TOKEN).create_run("22222222-2222-2222-2222-222222222222")
+        client.create_run("22222222-2222-2222-2222-222222222222")
     assert exc_info.value.status == 404
 
 
 # --- record_turn ------------------------------------------------------------
 
-def test_record_turn_serializes_full_payload(monkeypatch: pytest.MonkeyPatch):
-    captured = _patch_httpx(
-        monkeypatch,
+def test_record_turn_serializes_full_payload():
+    client, captured = _make_client(
         lambda r: httpx.Response(200, json={"status": "recorded", "next_step": None}),
     )
 
-    client = BackendClient(token=TOKEN, base_url="https://api.example.com")
     client.record_turn(
         "11111111-1111-1111-1111-111111111111",
         node_id="44444444-4444-4444-4444-444444444444",
@@ -189,16 +171,15 @@ def test_record_turn_serializes_full_payload(monkeypatch: pytest.MonkeyPatch):
     assert body["error"] == ""
 
 
-def test_record_turn_propagates_409_conflict(monkeypatch: pytest.MonkeyPatch):
+def test_record_turn_propagates_409_conflict():
     """409 means the run finished while we were processing a turn — the
     run loop must see this distinct from a generic 4xx so it can stop
     posting further turns and skip the /complete call."""
-    _patch_httpx(
-        monkeypatch,
+    client, _ = _make_client(
         lambda r: httpx.Response(409, json={"error": "run is already finished"}),
     )
     with pytest.raises(BackendClientError) as exc_info:
-        BackendClient(token=TOKEN).record_turn(
+        client.record_turn(
             "11111111-1111-1111-1111-111111111111",
             node_id="44444444-4444-4444-4444-444444444444",
             turn_number=1,
@@ -210,12 +191,11 @@ def test_record_turn_propagates_409_conflict(monkeypatch: pytest.MonkeyPatch):
 
 # --- complete_run -----------------------------------------------------------
 
-def test_complete_run_serializes_status(monkeypatch: pytest.MonkeyPatch):
-    captured = _patch_httpx(
-        monkeypatch,
+def test_complete_run_serializes_status():
+    client, captured = _make_client(
         lambda r: httpx.Response(200, json={"status": "ok"}),
     )
-    BackendClient(token=TOKEN).complete_run(
+    client.complete_run(
         "11111111-1111-1111-1111-111111111111",
         status="completed",
         completed_turns=3,
@@ -227,57 +207,123 @@ def test_complete_run_serializes_status(monkeypatch: pytest.MonkeyPatch):
 
 # --- transport-level errors -------------------------------------------------
 
-def test_transport_error_yields_status_zero(monkeypatch: pytest.MonkeyPatch):
+def test_transport_error_yields_status_zero():
     """DNS / connect / TLS failures get status=0 so the classifier
     routes them to BACKEND_UNREACHABLE."""
 
     def _raise(_: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("DNS failed")
 
-    _patch_httpx(monkeypatch, _raise)
+    client, _ = _make_client(_raise)
 
     with pytest.raises(BackendClientError) as exc_info:
-        BackendClient(token=TOKEN).health()
+        client.health()
     assert exc_info.value.status == 0
 
 
-def test_invalid_json_response_raises(monkeypatch: pytest.MonkeyPatch):
-    _patch_httpx(
-        monkeypatch,
+def test_invalid_json_response_raises():
+    client, _ = _make_client(
         lambda r: httpx.Response(200, content=b"<html>not json</html>"),
     )
     with pytest.raises(BackendClientError) as exc_info:
-        BackendClient(token=TOKEN).health()
+        client.health()
     # Body should be present (truncated) so debug logs can show what came back.
     assert "not json" in exc_info.value.body
 
 
-def test_truncates_long_response_body_in_error(monkeypatch: pytest.MonkeyPatch):
+def test_truncates_long_response_body_in_error():
     """500-char cap from architecture §7.4 — guard against a Backend
     bug that returns a 1MB error page from leaking into our exception."""
     huge = "X" * 5000
-    _patch_httpx(
-        monkeypatch,
+    client, _ = _make_client(
         lambda r: httpx.Response(500, content=huge.encode()),
     )
     with pytest.raises(BackendClientError) as exc_info:
-        BackendClient(token=TOKEN).health()
+        client.health()
     assert len(exc_info.value.body) < 600  # 500 + "...[truncated]" overhead
     assert exc_info.value.body.endswith("...[truncated]")
 
 
-def test_204_empty_body_does_not_crash(monkeypatch: pytest.MonkeyPatch):
+def test_204_empty_body_does_not_crash():
     """An endpoint that legitimately returns no body should not crash
     the JSON parser."""
-    _patch_httpx(
-        monkeypatch,
-        lambda r: httpx.Response(204),
-    )
+    client, _ = _make_client(lambda r: httpx.Response(204))
     # Use record_turn since it expects no return value.
-    BackendClient(token=TOKEN).record_turn(
+    client.record_turn(
         "11111111-1111-1111-1111-111111111111",
         node_id="44444444-4444-4444-4444-444444444444",
         turn_number=1,
         user_message="x",
         bot_response="y",
     )
+
+
+# --- persistent client lifecycle --------------------------------------------
+
+def test_close_is_idempotent():
+    """Releases the connection pool. Run loop's try/finally calls this
+    once on normal exit; a second call must not raise (defensive guard
+    against double-close races)."""
+    client = BackendClient(token=TOKEN)
+    client.close()
+    client.close()  # must not raise
+
+
+def test_context_manager_closes_on_exit():
+    """`with BackendClient(...)` is the cleanest pattern for short-lived
+    use; ensure the underlying httpx.Client is actually shut down."""
+    captured: list[httpx.Request] = []
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    httpx_client = httpx.Client(transport=httpx.MockTransport(_route))
+    with BackendClient(token=TOKEN, _client=httpx_client) as backend:
+        backend.health()
+
+    assert httpx_client.is_closed is True
+
+
+def test_persistent_client_reuses_connection_across_calls():
+    """A single BackendClient.create_run + record_turn + complete_run
+    chain must share the underlying httpx.Client (not allocate a new
+    one per call). Pin by asserting the captured Client identity."""
+    captured: list[httpx.Request] = []
+
+    def _route(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        if request.url.path.endswith("/runs"):
+            return httpx.Response(
+                201,
+                json={
+                    "run_id": "11111111-1111-1111-1111-111111111111",
+                    "scenario_id": "22222222-2222-2222-2222-222222222222",
+                    "max_turns": 1,
+                    "steps": [],
+                    "config": {},
+                },
+            )
+        return httpx.Response(200, json={"status": "ok"})
+
+    httpx_client = httpx.Client(transport=httpx.MockTransport(_route))
+    backend = BackendClient(token=TOKEN, _client=httpx_client)
+
+    backend.create_run("22222222-2222-2222-2222-222222222222")
+    backend.record_turn(
+        "11111111-1111-1111-1111-111111111111",
+        node_id="44444444-4444-4444-4444-444444444444",
+        turn_number=1,
+        user_message="x",
+        bot_response="y",
+    )
+    backend.complete_run(
+        "11111111-1111-1111-1111-111111111111",
+        status="completed",
+        completed_turns=1,
+    )
+
+    assert len(captured) == 3
+    assert httpx_client.is_closed is False
+    backend.close()
+    assert httpx_client.is_closed is True

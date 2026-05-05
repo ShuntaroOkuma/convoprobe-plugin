@@ -61,10 +61,14 @@ class RunEndpoint(Endpoint):
 
         # Create the run synchronously so we can return the run_id (and
         # surface auth/scenario errors as 4xx instead of an opaque 202).
+        # The client owns a persistent httpx.Client connection pool that
+        # the daemon thread continues to reuse for record_turn/complete;
+        # the thread's try/finally closes it.
         client = BackendClient(token=token, base_url=base_url)
         try:
             descriptor = client.create_run(scenario_id)
         except BackendClientError as e:
+            client.close()
             return _error(
                 _http_status_for(e.status),
                 "create_run_failed",
@@ -96,9 +100,25 @@ def _run_scenario_async(
     app_id: str,
     descriptor: RunDescriptor,
 ) -> None:
-    """Loop body. Owns conversation_id continuity, retry, and final
-    /complete reporting. Exceptions are caught and translated into a
-    failed completion so a crash in here cannot leak a 'running' row.
+    """Thin wrapper that guarantees the persistent httpx.Client is
+    closed when the daemon thread exits, no matter how _run_scenario_loop
+    terminates. Idempotent close — safe if the thread is interrupted late.
+    """
+    try:
+        _run_scenario_loop(session, client, app_id, descriptor)
+    finally:
+        client.close()
+
+
+def _run_scenario_loop(
+    session: Any,
+    client: BackendClient,
+    app_id: str,
+    descriptor: RunDescriptor,
+) -> None:
+    """Owns conversation_id continuity, retry, and final /complete
+    reporting. Exceptions are caught and translated into a failed
+    completion so a crash in here cannot leak a 'running' row.
     """
     completed_turns = 0
     final_status = "completed"
@@ -108,7 +128,7 @@ def _run_scenario_async(
 
     try:
         for step in descriptor.steps:
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 final_status = "partial"
                 error_summary = "total run timeout reached before all turns completed"
                 break
@@ -202,7 +222,7 @@ def _run_one_turn(
     # Attempt count = len(backoff) + 1 — the schedule lists *waits*, so a
     # 3-element list implies up to 4 attempts (initial + 3 retries).
     for attempt in range(len(RETRY_BACKOFF_SECONDS) + 1):
-        started = time.time()
+        started = time.monotonic()
         try:
             response = session.app.chat.invoke(
                 app_id=app_id,
@@ -211,14 +231,14 @@ def _run_one_turn(
                 response_mode="blocking",
                 conversation_id=conversation_id or None,
             )
-            outcome.response_time_ms = int((time.time() - started) * 1000)
+            outcome.response_time_ms = int((time.monotonic() - started) * 1000)
             outcome.bot_response, outcome.conversation_id, outcome.message_id = _extract_dify_response(response)
             return outcome
         except Exception as e:  # noqa: BLE001 — SDK throws bare Exception
             last_error = e
             verdict = classify(e)
             if not verdict.retriable or attempt >= len(RETRY_BACKOFF_SECONDS):
-                outcome.response_time_ms = int((time.time() - started) * 1000)
+                outcome.response_time_ms = int((time.monotonic() - started) * 1000)
                 outcome.error = f"{verdict.category.value}: {verdict.message}"[:500]
                 return outcome
             sleep_s = _jittered(RETRY_BACKOFF_SECONDS[attempt])
@@ -261,7 +281,7 @@ def _deadline_from(descriptor: RunDescriptor) -> float:
     raw = cfg.get("total_timeout_seconds")
     if isinstance(raw, int) and raw > 0:
         total = raw
-    return time.time() + total
+    return time.monotonic() + total
 
 
 def _jittered(base: float) -> float:

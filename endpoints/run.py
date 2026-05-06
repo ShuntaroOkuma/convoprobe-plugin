@@ -217,6 +217,11 @@ def _run_one_turn(
     """
     outcome = _TurnOutcome()
     user_message = step.get("user_message", "")
+    # Forward-compat: when the Backend's PluginRunStep gains an `inputs`
+    # field for chatflows that require structured input variables, we
+    # pick it up here without a Plugin code change. `or {}` covers both
+    # missing key and explicit JSON null.
+    step_inputs = step.get("inputs") or {}
     last_error: BaseException | None = None
 
     # Attempt count = len(backoff) + 1 — the schedule lists *waits*, so a
@@ -227,7 +232,7 @@ def _run_one_turn(
             response = session.app.chat.invoke(
                 app_id=app_id,
                 query=user_message,
-                inputs={},
+                inputs=step_inputs,
                 response_mode="blocking",
                 conversation_id=conversation_id or None,
             )

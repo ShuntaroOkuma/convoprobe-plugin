@@ -8,7 +8,7 @@ from dify_plugin.interfaces.endpoint import Endpoint
 class HealthEndpoint(Endpoint):
     def _invoke(self, r: Request, values: Mapping, settings: Mapping) -> Response:
         return Response(
-            response='{"status":"ok","plugin":"convoprobe","version":"0.0.1"}',
+            response='{"status":"ok","plugin":"convoprobe","version":"0.0.2"}',
             status=200,
             content_type="application/json",
         )

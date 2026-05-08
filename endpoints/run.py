@@ -1,9 +1,9 @@
-"""ConvoProbe /run endpoint — production conversation loop (T20-T23).
+"""ConvoProbe /run endpoint — synchronous conversation loop (T20-T23).
 
 Receives a trigger from Dify (Studio Test button, an HTTP node in a
 workflow, or a curl from the user's own automation) carrying a
-`scenario_id`. Acks immediately with 202 and runs the scenario in a
-daemon thread:
+`scenario_id`. Runs the scenario inline within the inbound request and
+returns the terminal result:
 
   1. POST Backend /api/internal/plugin/runs to materialize the run +
      fetch the static step list (start node + default branches).
@@ -13,16 +13,28 @@ daemon thread:
   3. POST each turn's outcome to /runs/<id>/turns.
   4. POST /runs/<id>/complete with completed | partial | failed.
 
-The endpoint never blocks the HTTP request beyond accept time; the loop
-runs detached so a slow Dify chat does not pin the daemon worker that
-fields the ack.
+Why synchronous (revised from Day 3 ADR-003)
+--------------------------------------------
+We originally spawned a daemon thread and returned 202 so the inbound
+request would not block. Phase 2 verification on Dify Cloud confirmed
+this does not work: `session.app.chat.invoke` (Reverse Invocation)
+relies on a TCP channel tied to the inbound request lifecycle, and the
+channel is closed the moment we return. Background threads therefore
+cannot reach Dify, and the run hangs in `running` until the Backend
+sweeper reaps it (which we observed firing after 10 minutes).
+
+Synchronous mode side-steps this entirely. Trade-off: the Plugin
+worker is held for the duration of the run (~5-15s/turn x N turns).
+For MVP scenarios (3-5 turns) this stays inside dify_plugin
+MAX_REQUEST_TIMEOUT_S=120s budget. Longer scenarios will hit that
+limit; if the request is killed mid-run, the Backend sweeper still
+fails the run after pluginRunTotalTimeoutSeconds (10 min).
 """
 from __future__ import annotations
 
 import json
 import logging
 import random
-import threading
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -59,11 +71,6 @@ class RunEndpoint(Endpoint):
 
         base_url = settings.get("convoprobe_api_base_url") or None
 
-        # Create the run synchronously so we can return the run_id (and
-        # surface auth/scenario errors as 4xx instead of an opaque 202).
-        # The client owns a persistent httpx.Client connection pool that
-        # the daemon thread continues to reuse for record_turn/complete;
-        # the thread's try/finally closes it.
         client = BackendClient(token=token, base_url=base_url)
         try:
             descriptor = client.create_run(scenario_id)
@@ -75,50 +82,44 @@ class RunEndpoint(Endpoint):
                 f"Backend rejected create_run: {e}",
             )
 
-        threading.Thread(
-            target=_run_scenario_async,
-            args=(self.session, client, app_id, descriptor),
-            daemon=True,
-            name=f"convoprobe-run-{descriptor.run_id[:8]}",
-        ).start()
+        # Run inline. Reverse Invocation is only valid during the inbound
+        # request lifecycle, so we cannot offload to a background thread
+        # (see module docstring).
+        try:
+            result = _run_scenario_sync(self.session, client, app_id, descriptor)
+        finally:
+            client.close()
 
+        # Whatever happened, the run is now terminal in the Backend.
+        # Surface the final state so the caller (Dify Studio test pane,
+        # workflow HTTP node, etc.) sees something useful.
         return Response(
             response=json.dumps({
                 "run_id": descriptor.run_id,
                 "scenario_id": descriptor.scenario_id,
-                "status": "accepted",
+                "status": result["status"],
+                "completed_turns": result["completed_turns"],
                 "estimated_turns": len(descriptor.steps),
+                "error_summary": result.get("error_summary", ""),
             }),
-            status=202,
+            # 200 even for failed runs — the HTTP call itself succeeded;
+            # the failure semantics are in the body. Mirrors Dify own
+            # convention where a 200 carries an error event in stream mode.
+            status=200,
             content_type="application/json",
         )
 
 
-def _run_scenario_async(
+def _run_scenario_sync(
     session: Any,
     client: BackendClient,
     app_id: str,
     descriptor: RunDescriptor,
-) -> None:
-    """Thin wrapper that guarantees the persistent httpx.Client is
-    closed when the daemon thread exits, no matter how _run_scenario_loop
-    terminates. Idempotent close — safe if the thread is interrupted late.
-    """
-    try:
-        _run_scenario_loop(session, client, app_id, descriptor)
-    finally:
-        client.close()
-
-
-def _run_scenario_loop(
-    session: Any,
-    client: BackendClient,
-    app_id: str,
-    descriptor: RunDescriptor,
-) -> None:
+) -> dict[str, Any]:
     """Owns conversation_id continuity, retry, and final /complete
     reporting. Exceptions are caught and translated into a failed
     completion so a crash in here cannot leak a 'running' row.
+    Returns the terminal result dict {status, completed_turns, error_summary}.
     """
     completed_turns = 0
     final_status = "completed"
@@ -188,6 +189,18 @@ def _run_scenario_loop(
             descriptor.run_id,
             e,
         )
+        # Caller will surface this via the response body. The Backend
+        # sweeper is the safety net for the row state.
+        if not error_summary:
+            error_summary = f"complete_run failed: {e}"
+        if final_status == "completed":
+            final_status = "failed"
+
+    return {
+        "status": final_status,
+        "completed_turns": completed_turns,
+        "error_summary": error_summary,
+    }
 
 
 class _TurnOutcome:

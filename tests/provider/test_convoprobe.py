@@ -37,6 +37,15 @@ class _FakeBackend:
     def close(self):
         self.closed = True
 
+    # Context manager protocol mirrors helpers.backend_client.BackendClient
+    # so the production code (which uses `with BackendClient(...) as ...`)
+    # exercises the same surface in tests.
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
 
 def _patch(monkeypatch: pytest.MonkeyPatch, fake: _FakeBackend) -> dict:
     captured: dict[str, Any] = {}

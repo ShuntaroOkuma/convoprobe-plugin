@@ -34,9 +34,9 @@ class ConvoProbeProvider(ToolProvider):
 
         base_url = (credentials or {}).get("convoprobe_api_base_url") or None
 
-        client = BackendClient(token=token, base_url=base_url)
         try:
-            client.health()
+            with BackendClient(token=token, base_url=base_url) as client:
+                client.health()
         except BackendClientError as e:
             if e.status == 401:
                 raise ToolProviderCredentialValidationError(
@@ -49,5 +49,3 @@ class ConvoProbeProvider(ToolProvider):
                 "Verify the URL and network connectivity. "
                 f"Detail: {e}"
             ) from e
-        finally:
-            client.close()

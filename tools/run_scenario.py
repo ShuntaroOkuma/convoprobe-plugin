@@ -47,17 +47,15 @@ class RunScenarioTool(Tool):
             return []
         base_url = creds.get("convoprobe_api_base_url") or None
 
-        client = BackendClient(token=token, base_url=base_url)
         try:
-            items = client.list_scenarios()
+            with BackendClient(token=token, base_url=base_url) as client:
+                items = client.list_scenarios()
         except BackendClientError:
             # Backend may not yet expose /scenarios (spike phase). Return
             # an empty list rather than raising — the user will see
             # "no scenarios" and can investigate via the ConvoProbe Web
             # UI rather than the tool config panel breaking outright.
             return []
-        finally:
-            client.close()
 
         # I18nObject in the SDK currently only models en_US/zh_Hans/pt_BR
         # (see dify_plugin/entities/__init__.py); ja_JP passed here would

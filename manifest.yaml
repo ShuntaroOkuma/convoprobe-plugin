@@ -1,4 +1,4 @@
-version: 0.0.4
+version: 0.0.5
 type: plugin
 author: shuntaro-okuma
 name: convoprobe-qa
@@ -27,7 +27,7 @@ plugins:
   tools:
     - provider/convoprobe.yaml
 meta:
-  version: 0.0.4
+  version: 0.0.5
   arch:
     - amd64
     - arm64

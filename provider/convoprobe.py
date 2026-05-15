@@ -19,10 +19,17 @@ from helpers.backend_client import BackendClient, BackendClientError
 
 class ConvoProbeProvider(ToolProvider):
     def _validate_credentials(self, credentials: dict[str, Any]) -> None:
+        # Error messages are deliberately action-first and avoid the `>`
+        # character (Dify Studio surfaces the message wrapped in a JSON
+        # blob, which escapes `>` to `>` and makes the breadcrumb
+        # unreadable). The first sentence is the user's next step so the
+        # message remains useful even when truncated by the UI.
         token = (credentials or {}).get("convoprobe_api_token") or ""
         if not token:
             raise ToolProviderCredentialValidationError(
-                "convoprobe_api_token is required"
+                "ConvoProbe API token is required. "
+                "Open the ConvoProbe Web UI, go to Settings then Plugin, "
+                "and paste a token starting with cp_."
             )
 
         base_url = (credentials or {}).get("convoprobe_api_base_url") or None
@@ -33,11 +40,14 @@ class ConvoProbeProvider(ToolProvider):
         except BackendClientError as e:
             if e.status == 401:
                 raise ToolProviderCredentialValidationError(
-                    "ConvoProbe rejected the token (401). Re-issue from "
-                    "ConvoProbe Web UI -> Settings -> Plugin."
+                    "Invalid ConvoProbe API token. "
+                    "Issue a fresh one in the ConvoProbe Web UI under "
+                    "Settings then Plugin (starts with cp_), then paste it here."
                 ) from e
             raise ToolProviderCredentialValidationError(
-                f"Could not reach ConvoProbe Backend: {e}"
+                "Cannot reach ConvoProbe Backend at the configured API Base URL. "
+                "Verify the URL and network connectivity. "
+                f"Detail: {e}"
             ) from e
         finally:
             client.close()

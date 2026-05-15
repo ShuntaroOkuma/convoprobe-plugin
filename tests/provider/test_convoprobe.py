@@ -73,7 +73,12 @@ def test_validate_rejects_with_helpful_message_on_401(monkeypatch):
 
     with pytest.raises(ToolProviderCredentialValidationError) as exc:
         ConvoProbeProvider()._validate_credentials({"convoprobe_api_token": TOKEN})
-    assert "Re-issue" in str(exc.value)
+    msg = str(exc.value)
+    # Action-first phrasing: must lead the user to issue a new token.
+    assert "Invalid ConvoProbe API token" in msg
+    assert "Issue a fresh one" in msg
+    # Avoid `>` so Dify Studio JSON wrapping doesn't escape to `>`.
+    assert ">" not in msg
     assert fake.closed is True
 
 
@@ -84,8 +89,24 @@ def test_validate_surfaces_generic_backend_failure(monkeypatch):
 
     with pytest.raises(ToolProviderCredentialValidationError) as exc:
         ConvoProbeProvider()._validate_credentials({"convoprobe_api_token": TOKEN})
-    assert "Could not reach" in str(exc.value)
+    msg = str(exc.value)
+    assert "Cannot reach ConvoProbe Backend" in msg
+    assert "API Base URL" in msg
+    assert ">" not in msg
     assert fake.closed is True
+
+
+def test_validate_missing_token_message_is_action_first(monkeypatch):
+    # Same constraint as the 401 path: lead with the next step the user
+    # should take, and avoid `>` to dodge JSON-escape ugliness.
+    _patch(monkeypatch, _FakeBackend(health_error=RuntimeError("must not call")))
+
+    with pytest.raises(ToolProviderCredentialValidationError) as exc:
+        ConvoProbeProvider()._validate_credentials({})
+    msg = str(exc.value)
+    assert "ConvoProbe API token is required" in msg
+    assert "cp_" in msg
+    assert ">" not in msg
 
 
 def test_validate_forwards_base_url(monkeypatch):

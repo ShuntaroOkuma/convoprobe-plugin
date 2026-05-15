@@ -19,9 +19,13 @@ resource:
       llm: true
     endpoint:
       enabled: true
+    tool:
+      enabled: true
 plugins:
   endpoints:
     - group/convoprobe.yaml
+  tools:
+    - provider/convoprobe.yaml
 meta:
   version: 0.0.2
   arch:

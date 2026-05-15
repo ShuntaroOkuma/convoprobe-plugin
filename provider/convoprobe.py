@@ -19,17 +19,19 @@ from helpers.backend_client import BackendClient, BackendClientError
 
 class ConvoProbeProvider(ToolProvider):
     def _validate_credentials(self, credentials: dict[str, Any]) -> None:
-        # Error messages are deliberately action-first and avoid the `>`
-        # character (Dify Studio surfaces the message wrapped in a JSON
-        # blob, which escapes `>` to `>` and makes the breadcrumb
-        # unreadable). The first sentence is the user's next step so the
-        # message remains useful even when truncated by the UI.
+        # Dify Studio wraps every plugin exception in a PluginInvokeError
+        # JSON envelope (see dify_plugin/core/server/io_server.py:117).
+        # The visible result is roughly:
+        #   PluginInvokeError: {"args":{},"error_type":"...Error","message":"..."}
+        # The error_type and JSON syntax eat ~80 characters of visual
+        # budget before our message starts, and Dify Studio truncates
+        # long lines. So we keep messages short enough that the action
+        # survives the truncation. Avoiding `>` because JSON escapes it
+        # to `>` in the displayed envelope.
         token = (credentials or {}).get("convoprobe_api_token") or ""
         if not token:
             raise ToolProviderCredentialValidationError(
-                "ConvoProbe API token is required. "
-                "Open the ConvoProbe Web UI, go to Settings then Plugin, "
-                "and paste a token starting with cp_."
+                "ConvoProbe token required. Get one in Web UI Settings, then Plugin."
             )
 
         base_url = (credentials or {}).get("convoprobe_api_base_url") or None
@@ -40,12 +42,8 @@ class ConvoProbeProvider(ToolProvider):
         except BackendClientError as e:
             if e.status == 401:
                 raise ToolProviderCredentialValidationError(
-                    "Invalid ConvoProbe API token. "
-                    "Issue a fresh one in the ConvoProbe Web UI under "
-                    "Settings then Plugin (starts with cp_), then paste it here."
+                    "ConvoProbe token rejected. Reissue in Web UI Settings, then Plugin."
                 ) from e
             raise ToolProviderCredentialValidationError(
-                "Cannot reach ConvoProbe Backend at the configured API Base URL. "
-                "Verify the URL and network connectivity. "
-                f"Detail: {e}"
+                f"ConvoProbe Backend unreachable. Check the API Base URL above. ({e})"
             ) from e

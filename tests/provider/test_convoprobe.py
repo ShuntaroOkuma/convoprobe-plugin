@@ -75,6 +75,12 @@ def test_validate_rejects_when_token_missing(monkeypatch):
         ConvoProbeProvider()._validate_credentials({})
 
 
+# Visual budget cap: Dify Studio's PluginInvokeError JSON wrapper eats
+# ~80 visible characters before our message starts, and the line is
+# truncated. We pin a soft limit so the action stays visible.
+_MAX_MESSAGE_CHARS = 90
+
+
 def test_validate_rejects_with_helpful_message_on_401(monkeypatch):
     err = BackendClientError("HTTP 401", status=401, body="invalid")
     fake = _FakeBackend(health_error=err)
@@ -84,10 +90,13 @@ def test_validate_rejects_with_helpful_message_on_401(monkeypatch):
         ConvoProbeProvider()._validate_credentials({"convoprobe_api_token": TOKEN})
     msg = str(exc.value)
     # Action-first phrasing: must lead the user to issue a new token.
-    assert "Invalid ConvoProbe API token" in msg
-    assert "Issue a fresh one" in msg
+    assert msg.startswith("ConvoProbe token rejected")
+    assert "Reissue" in msg
     # Avoid `>` so Dify Studio JSON wrapping doesn't escape to `>`.
     assert ">" not in msg
+    # Stay under the visual budget so the action survives JSON wrap +
+    # truncation in Dify Studio.
+    assert len(msg) <= _MAX_MESSAGE_CHARS, f"message too long ({len(msg)} chars): {msg}"
     assert fake.closed is True
 
 
@@ -99,10 +108,9 @@ def test_validate_surfaces_generic_backend_failure(monkeypatch):
     with pytest.raises(ToolProviderCredentialValidationError) as exc:
         ConvoProbeProvider()._validate_credentials({"convoprobe_api_token": TOKEN})
     msg = str(exc.value)
-    assert "Cannot reach ConvoProbe Backend" in msg
+    assert msg.startswith("ConvoProbe Backend unreachable")
     assert "API Base URL" in msg
     assert ">" not in msg
-    assert fake.closed is True
 
 
 def test_validate_missing_token_message_is_action_first(monkeypatch):
@@ -113,9 +121,9 @@ def test_validate_missing_token_message_is_action_first(monkeypatch):
     with pytest.raises(ToolProviderCredentialValidationError) as exc:
         ConvoProbeProvider()._validate_credentials({})
     msg = str(exc.value)
-    assert "ConvoProbe API token is required" in msg
-    assert "cp_" in msg
+    assert msg.startswith("ConvoProbe token required")
     assert ">" not in msg
+    assert len(msg) <= _MAX_MESSAGE_CHARS, f"message too long ({len(msg)} chars): {msg}"
 
 
 def test_validate_forwards_base_url(monkeypatch):

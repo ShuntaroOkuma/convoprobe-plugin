@@ -79,9 +79,16 @@ class RunScenarioTool(Tool):
         Tool→Endpoint reuse path. Replaced by the real run loop in T39.
         """
         scenario_id = tool_parameters.get("scenario_id") or ""
-        target_app = tool_parameters.get("target_app") or {}
+        # `app-selector` returns a dict ({app_id, app_type, ...}) when the
+        # user picks from the dropdown. Inside a workflow the same slot
+        # can be fed by a variable or another node's output, in which
+        # case Dify hands us the raw app_id string. Accept both rather
+        # than silently dropping the latter.
+        target_app = tool_parameters.get("target_app")
         if isinstance(target_app, dict):
             app_id = target_app.get("app_id") or ""
+        elif isinstance(target_app, str):
+            app_id = target_app
         else:
             app_id = ""
         wait_for_completion = bool(tool_parameters.get("wait_for_completion", True))

@@ -162,15 +162,30 @@ def test_invoke_defaults_when_optional_params_missing():
     assert payload["wait_for_completion"] is True  # default
 
 
-def test_invoke_tolerates_non_dict_target_app():
-    """app-selector returns ``{app_id, app_type, ...}`` in normal use, but
-    a workflow may also feed the slot a raw string id. We must not crash
-    on that input — let the run loop reject it once T39 wires the real
-    execution path."""
+def test_invoke_extracts_target_app_from_raw_string():
+    """`app-selector` returns ``{app_id, app_type, ...}`` when the user
+    picks from the dropdown, but inside a workflow the slot can also
+    be fed by a variable or another node's output, in which case Dify
+    passes the raw app_id string. Both shapes must yield the same
+    target_app_id downstream."""
     tool = _tool()
     messages = list(tool._invoke({
         "scenario_id": "scn-1",
-        "target_app": "raw-string-not-dict",
+        "target_app": "raw-string-id",
     }))
     payload = messages[0].message.json_object
-    assert payload["target_app_id"] == ""
+    assert payload["target_app_id"] == "raw-string-id"
+
+
+def test_invoke_drops_unsupported_target_app_shapes():
+    """Anything that's neither a dict nor a string (None, list, int)
+    should fall back to empty rather than crash. The real run loop
+    will reject the empty value when T39 wires it up."""
+    tool = _tool()
+    for bogus in (None, [], 42):
+        messages = list(tool._invoke({
+            "scenario_id": "scn-1",
+            "target_app": bogus,
+        }))
+        payload = messages[0].message.json_object
+        assert payload["target_app_id"] == "", f"unexpected non-empty for {bogus!r}: {payload}"

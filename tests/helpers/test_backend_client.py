@@ -77,6 +77,62 @@ def test_health_sends_bearer_and_returns_payload():
     assert req.headers.get("authorization") == f"Bearer {TOKEN}"
 
 
+# --- list_scenarios ---------------------------------------------------------
+
+def test_list_scenarios_returns_normalized_list():
+    client, captured = _make_client(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "scenarios": [
+                    {"id": "s1", "name": "FAQ regression"},
+                    {"id": "s2", "name": "Order intent"},
+                ]
+            },
+        ),
+    )
+    items = client.list_scenarios()
+    assert items == [
+        {"id": "s1", "name": "FAQ regression"},
+        {"id": "s2", "name": "Order intent"},
+    ]
+    assert str(captured[0].url) == "https://api.example.com/api/internal/plugin/scenarios"
+
+
+def test_list_scenarios_drops_malformed_items():
+    client, _ = _make_client(
+        lambda r: httpx.Response(
+            200,
+            json={
+                "scenarios": [
+                    {"id": "good", "name": "Has name"},
+                    {"name": "Missing id, skipped"},
+                    "not a dict",
+                    {"id": "", "name": "Empty id, skipped"},
+                    {"id": "no-name-falls-back"},
+                ]
+            },
+        ),
+    )
+    items = client.list_scenarios()
+    assert items == [
+        {"id": "good", "name": "Has name"},
+        {"id": "no-name-falls-back", "name": "no-name-falls-back"},
+    ]
+
+
+def test_list_scenarios_returns_empty_when_field_missing():
+    client, _ = _make_client(lambda r: httpx.Response(200, json={}))
+    assert client.list_scenarios() == []
+
+
+def test_list_scenarios_propagates_404_so_caller_can_handle():
+    client, _ = _make_client(lambda r: httpx.Response(404, text="not found"))
+    with pytest.raises(BackendClientError) as exc:
+        client.list_scenarios()
+    assert exc.value.status == 404
+
+
 # --- create_run -------------------------------------------------------------
 
 def test_create_run_happy_path():

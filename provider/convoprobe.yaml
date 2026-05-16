@@ -1,0 +1,45 @@
+identity:
+  author: shuntaro-okuma
+  name: convoprobe
+  description:
+    en_US: Multi-turn chatbot QA testing for Dify chatbots.
+    ja_JP: Dify チャットボットのマルチターン品質テスト。
+  icon: icon.svg
+  label:
+    en_US: ConvoProbe
+    ja_JP: ConvoProbe
+  tags:
+    - productivity
+    - utilities
+credentials_for_provider:
+  convoprobe_api_token:
+    type: secret-input
+    required: true
+    label:
+      en_US: ConvoProbe API Token
+      ja_JP: ConvoProbe API トークン
+    placeholder:
+      en_US: cp_xxxxxxxx...
+      ja_JP: cp_xxxxxxxx...
+    help:
+      en_US: Issue a token from ConvoProbe Web UI -> Settings -> Plugin
+      ja_JP: ConvoProbe Web UI の 設定 → Plugin から発行してください
+    url: https://convoprobe.vercel.app
+  convoprobe_api_base_url:
+    type: text-input
+    required: false
+    default: https://convoprobe.vercel.app
+    label:
+      en_US: ConvoProbe API Base URL (advanced)
+      ja_JP: ConvoProbe API ベース URL（詳細）
+    placeholder:
+      en_US: https://convoprobe.vercel.app
+      ja_JP: https://convoprobe.vercel.app
+    help:
+      en_US: Defaults to ConvoProbe SaaS. Set only for self-hosted deployments.
+      ja_JP: 通常は ConvoProbe SaaS が利用されます。セルフホスト時のみ設定してください。
+tools:
+  - tools/run_scenario.yaml
+extra:
+  python:
+    source: provider/convoprobe.py

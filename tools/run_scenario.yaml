@@ -1,0 +1,53 @@
+identity:
+  author: shuntaro-okuma
+  name: run_scenario
+  label:
+    en_US: Run Scenario
+    ja_JP: シナリオを実行
+
+description:
+  human:
+    en_US: Run a saved ConvoProbe scenario against a Dify chatbot in this workspace.
+    ja_JP: ConvoProbe に保存済みのシナリオを、このワークスペース内の Dify チャットボットに対して実行します。
+  llm: Run a multi-turn QA test scenario against a Dify chatbot. Takes a scenario_id and a target_app, returns run_id, status, score and a transcript URL.
+
+extra:
+  python:
+    source: tools/run_scenario.py
+
+parameters:
+  - name: scenario_id
+    type: dynamic-select
+    form: form
+    required: true
+    label:
+      en_US: Scenario
+      ja_JP: シナリオ
+    human_description:
+      en_US: Select a scenario you have created in ConvoProbe Web UI.
+      ja_JP: ConvoProbe Web UI で作成済みのシナリオを選択してください。
+    llm_description: ConvoProbe scenario identifier (UUID).
+  - name: target_app
+    type: app-selector
+    scope: chat
+    form: form
+    required: true
+    label:
+      en_US: Target Chatbot
+      ja_JP: テスト対象チャットボット
+    human_description:
+      en_US: Select the chatbot in this workspace to test.
+      ja_JP: このワークスペース内のテスト対象チャットボットを選択してください。
+    llm_description: Target Dify chat app to evaluate.
+  - name: wait_for_completion
+    type: boolean
+    form: form
+    required: false
+    default: true
+    label:
+      en_US: Wait for completion
+      ja_JP: 完了を待つ
+    human_description:
+      en_US: When enabled, the node blocks until the run finishes and returns the final score. When disabled, the node returns immediately with run_id only.
+      ja_JP: 有効にすると Run が完了するまでノードがブロックし、最終スコアを返します。無効にすると即座に run_id のみを返します。
+    llm_description: Whether to wait for the run to complete (default true).

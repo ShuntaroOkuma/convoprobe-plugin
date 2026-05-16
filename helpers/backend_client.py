@@ -101,6 +101,29 @@ class BackendClient:
         """GET /api/internal/plugin/health — confirms token is valid."""
         return self._request("GET", "/api/internal/plugin/health")
 
+    def list_scenarios(self) -> list[dict[str, Any]]:
+        """GET /api/internal/plugin/scenarios — list scenarios visible to
+        this token, for the Tool plugin's dynamic dropdown (PRD v0.2 F4).
+
+        Returns a list of ``{"id": str, "name": str}`` dicts. The Backend
+        endpoint is not yet implemented at the time of this spike (T38);
+        callers should treat a 404 as "feature not yet wired" and degrade
+        gracefully rather than failing the whole tool config UI.
+        """
+        body = self._request("GET", "/api/internal/plugin/scenarios")
+        items = body.get("scenarios") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            return []
+        result: list[dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            sid = it.get("id")
+            name = it.get("name") or sid
+            if isinstance(sid, str) and sid:
+                result.append({"id": sid, "name": str(name)})
+        return result
+
     def create_run(self, scenario_id: str) -> RunDescriptor:
         """POST /api/internal/plugin/runs.
 

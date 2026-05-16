@@ -134,58 +134,135 @@ def test_fetch_options_degrades_gracefully_on_backend_error(monkeypatch):
 
 
 # --- _invoke ----------------------------------------------------------------
+#
+# T39.2: spike echo replaced with execute_scenario_run. We patch the
+# helper at the import location (`tools.run_scenario.execute_scenario_run`)
+# rather than reaching into helpers — the Tool's contract is "call the
+# helper, yield the payload", so the test should pin that boundary.
 
-def test_invoke_yields_single_json_echo_message():
-    """Spike contract: one JSON message with the chosen params. Replaced
-    by real run-loop output in T39 — anchor the shape so the contract
-    flip is intentional."""
+from helpers.run_executor import RunResult
+
+
+def _patch_executor(monkeypatch: pytest.MonkeyPatch, result_or_exc: Any) -> dict:
+    """Replace execute_scenario_run with a controllable stub.
+
+    Pass a RunResult to simulate a successful run, or an exception
+    instance to simulate a failure (raised when the stub is called).
+    Returns a captured-args dict so tests can assert what the Tool
+    forwarded to the helper.
+    """
+    captured: dict[str, Any] = {}
+
+    def _stub(session, client, *, app_id, scenario_id, **kwargs):
+        captured["app_id"] = app_id
+        captured["scenario_id"] = scenario_id
+        captured["kwargs"] = kwargs
+        if isinstance(result_or_exc, BaseException):
+            raise result_or_exc
+        return result_or_exc
+
+    monkeypatch.setattr("tools.run_scenario.execute_scenario_run", _stub)
+    # Also patch BackendClient so the `with` block in _invoke doesn't try
+    # to open a real httpx.Client — we don't care about it in these tests.
+    monkeypatch.setattr("tools.run_scenario.BackendClient", lambda **kw: _FakeBackend())
+    return captured
+
+
+_HAPPY_RESULT = RunResult(
+    run_id="run-1",
+    scenario_id="scn-123",
+    status="completed",
+    completed_turns=3,
+    estimated_turns=3,
+    error_summary="",
+    transcript_url="https://convoprobe.vercel.app/en/scenarios/executions/run-1",
+)
+
+
+def test_invoke_calls_executor_and_yields_payload(monkeypatch):
+    """Happy path: helper returns a RunResult, Tool yields its
+    to_payload() shape so downstream Dify nodes get a stable JSON."""
+    captured = _patch_executor(monkeypatch, _HAPPY_RESULT)
     tool = _tool()
+
     messages = list(tool._invoke({
         "scenario_id": "scn-123",
         "target_app": {"app_id": "app-abc"},
-        "wait_for_completion": False,
     }))
 
     assert len(messages) == 1
     payload = messages[0].message.json_object
-    assert payload["spike"] is True
-    assert payload["scenario_id"] == "scn-123"
-    assert payload["target_app_id"] == "app-abc"
-    assert payload["wait_for_completion"] is False
+    assert payload == _HAPPY_RESULT.to_payload()
+    assert captured["scenario_id"] == "scn-123"
+    assert captured["app_id"] == "app-abc"
 
 
-def test_invoke_defaults_when_optional_params_missing():
-    tool = _tool()
-    messages = list(tool._invoke({"scenario_id": "scn-1"}))
-    payload = messages[0].message.json_object
-    assert payload["target_app_id"] == ""
-    assert payload["wait_for_completion"] is True  # default
-
-
-def test_invoke_extracts_target_app_from_raw_string():
-    """`app-selector` returns ``{app_id, app_type, ...}`` when the user
-    picks from the dropdown, but inside a workflow the slot can also
-    be fed by a variable or another node's output, in which case Dify
-    passes the raw app_id string. Both shapes must yield the same
-    target_app_id downstream."""
-    tool = _tool()
-    messages = list(tool._invoke({
+def test_invoke_extracts_target_app_from_raw_string(monkeypatch):
+    """`app-selector` returns a dict from the dropdown but inside a
+    workflow the slot can be fed by a variable, in which case Dify
+    passes the raw app_id string. Both shapes must reach the helper
+    with the same app_id."""
+    captured = _patch_executor(monkeypatch, _HAPPY_RESULT)
+    list(_tool()._invoke({
         "scenario_id": "scn-1",
         "target_app": "raw-string-id",
     }))
+    assert captured["app_id"] == "raw-string-id"
+
+
+def test_invoke_yields_error_for_missing_scenario_id(monkeypatch):
+    """The dropdown should always be selected before run, but a workflow
+    variable could leave it empty. The Tool yields a structured error
+    rather than crashing or no-op'ing silently."""
+    _patch_executor(monkeypatch, _HAPPY_RESULT)  # never called
+    messages = list(_tool()._invoke({"scenario_id": "", "target_app": {"app_id": "app"}}))
+    assert "error" in messages[0].message.json_object
+    assert "scenario_id" in messages[0].message.json_object["error"]
+
+
+def test_invoke_yields_error_for_missing_target_app(monkeypatch):
+    _patch_executor(monkeypatch, _HAPPY_RESULT)
+    messages = list(_tool()._invoke({"scenario_id": "scn-1"}))
+    assert "error" in messages[0].message.json_object
+    assert "target_app" in messages[0].message.json_object["error"]
+
+
+def test_invoke_yields_error_for_missing_token(monkeypatch):
+    _patch_executor(monkeypatch, _HAPPY_RESULT)
+    # _tool() injects a token; build the Tool directly without one
+    tool = RunScenarioTool.from_credentials({})
+    messages = list(tool._invoke({
+        "scenario_id": "scn-1",
+        "target_app": {"app_id": "app-1"},
+    }))
+    assert "token" in messages[0].message.json_object.get("error", "").lower()
+
+
+def test_invoke_yields_error_when_create_run_fails(monkeypatch):
+    """create_run failures (auth/network/missing scenario) should surface
+    as a structured JSON message, not as a raised exception that Dify
+    Studio wraps in PluginInvokeError noise."""
+    _patch_executor(
+        monkeypatch,
+        BackendClientError("HTTP 404", status=404, body=""),
+    )
+    messages = list(_tool()._invoke({
+        "scenario_id": "scn-1",
+        "target_app": {"app_id": "app-1"},
+    }))
     payload = messages[0].message.json_object
-    assert payload["target_app_id"] == "raw-string-id"
+    assert "error" in payload
+    assert payload.get("status_code") == 404
 
 
-def test_invoke_drops_unsupported_target_app_shapes():
+def test_invoke_drops_unsupported_target_app_shapes(monkeypatch):
     """Anything that's neither a dict nor a string (None, list, int)
-    should fall back to empty rather than crash. The real run loop
-    will reject the empty value when T39 wires it up."""
-    tool = _tool()
+    should fall back to empty -> trip the missing-target_app error."""
+    _patch_executor(monkeypatch, _HAPPY_RESULT)
     for bogus in (None, [], 42):
-        messages = list(tool._invoke({
+        messages = list(_tool()._invoke({
             "scenario_id": "scn-1",
             "target_app": bogus,
         }))
         payload = messages[0].message.json_object
-        assert payload["target_app_id"] == "", f"unexpected non-empty for {bogus!r}: {payload}"
+        assert "error" in payload, f"expected fallback error for {bogus!r}, got {payload}"

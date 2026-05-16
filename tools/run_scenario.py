@@ -28,6 +28,7 @@ from dify_plugin.entities import I18nObject, ParameterOption
 from dify_plugin.entities.tool import ToolInvokeMessage
 
 from helpers.backend_client import BackendClient, BackendClientError
+from helpers.run_executor import execute_scenario_run
 
 
 class RunScenarioTool(Tool):
@@ -74,9 +75,13 @@ class RunScenarioTool(Tool):
         self,
         tool_parameters: dict[str, Any],
     ) -> Generator[ToolInvokeMessage, None, None]:
-        """Spike implementation: echo parameters so the node integration is
-        verifiable in Dify Studio without depending on the (yet-to-be-built)
-        Tool→Endpoint reuse path. Replaced by the real run loop in T39.
+        """Drive a scenario synchronously and return the terminal payload.
+
+        Shares `helpers.run_executor.execute_scenario_run` with the
+        existing /run Endpoint so Tool callers and curl/HTTP-node
+        callers see exactly the same shape. `wait_for_completion=False`
+        is currently a no-op (always synchronous) — fast-path returning
+        only `run_id` is T39.3.
         """
         scenario_id = tool_parameters.get("scenario_id") or ""
         # `app-selector` returns a dict ({app_id, app_type, ...}) when the
@@ -91,12 +96,45 @@ class RunScenarioTool(Tool):
             app_id = target_app
         else:
             app_id = ""
-        wait_for_completion = bool(tool_parameters.get("wait_for_completion", True))
 
-        yield self.create_json_message({
-            "spike": True,
-            "note": "Tool wired; actual run execution lands in T39",
-            "scenario_id": scenario_id,
-            "target_app_id": app_id,
-            "wait_for_completion": wait_for_completion,
-        })
+        if not scenario_id:
+            yield self.create_json_message({
+                "error": "scenario_id is required (pick one from the dropdown).",
+            })
+            return
+        if not app_id:
+            yield self.create_json_message({
+                "error": "target_app is required (pick a Dify chatbot from the selector).",
+            })
+            return
+
+        creds = self.runtime.credentials or {}
+        token = creds.get("convoprobe_api_token") or ""
+        base_url = creds.get("convoprobe_api_base_url") or None
+        if not token:
+            yield self.create_json_message({
+                "error": "ConvoProbe API token missing from plugin credentials.",
+            })
+            return
+
+        try:
+            with BackendClient(token=token, base_url=base_url) as client:
+                result = execute_scenario_run(
+                    self.session,
+                    client,
+                    app_id=app_id,
+                    scenario_id=scenario_id,
+                )
+        except BackendClientError as e:
+            # create_run failed (auth / scenario not found / network).
+            # Surface as a structured error message rather than raising —
+            # Dify Studio shows yielded JSON inline in the workflow run
+            # panel, exceptions get wrapped in the noisy PluginInvokeError
+            # envelope.
+            yield self.create_json_message({
+                "error": f"Backend rejected create_run: {e}",
+                "status_code": e.status,
+            })
+            return
+
+        yield self.create_json_message(result.to_payload())

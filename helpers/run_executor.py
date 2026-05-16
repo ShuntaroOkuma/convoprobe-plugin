@@ -119,6 +119,15 @@ def _build_transcript_url(base: str, locale: str, scenario_id: str, run_id: str)
     scenario_id is currently unused but kept in the signature so a
     future redesign (e.g., nested under scenario detail) doesn't need
     to thread the value through fresh.
+
+    `locale` defaults to "en" at the call site because the Dify Plugin
+    SDK's ToolRuntime only exposes credentials + user_id today (see
+    dify_plugin/entities/tool.py:34 — no `locale` or `user_lang`
+    field). ConvoProbe Web UI auto-redirects to the user's browser
+    locale on first visit, so an English URL is a benign default. When
+    the SDK adds a locale getter the call site in
+    tools/run_scenario.py can pass it through without changing this
+    builder.
     """
     _ = scenario_id
     return f"{base.rstrip('/')}/{locale}/scenarios/executions/{run_id}"
@@ -152,13 +161,17 @@ def _run_scenario_sync(
     /complete reporting. Catches all exceptions so a crash in here cannot
     leak a 'running' row in the Backend.
     """
+    # Status accumulators live OUTSIDE the try so the complete_run leg
+    # below can see them even if initialization (e.g., _deadline_from)
+    # blew up. Anything that *can* raise is inside the try.
     completed_turns = 0
     final_status = "completed"
     error_summary = ""
-    conversation_id = ""
-    deadline = _deadline_from(descriptor)
 
     try:
+        conversation_id = ""
+        deadline = _deadline_from(descriptor)
+
         for step in descriptor.steps:
             if time.monotonic() >= deadline:
                 final_status = "partial"
@@ -252,10 +265,16 @@ def _run_one_turn(
     step_inputs = step.get("inputs") or {}
     last_error: BaseException | None = None
 
+    # `started` lives outside the retry loop so response_time_ms reflects
+    # the WALL-CLOCK turn cost (all attempts + jittered backoff sleeps),
+    # not just the final attempt's invoke duration. Users debugging slow
+    # turns want to see "this turn took 18s including 2 retries", not
+    # "the lucky 3rd attempt took 4s".
+    started = time.monotonic()
+
     # Attempt count = len(backoff) + 1 — the schedule lists *waits*, so a
     # 3-element list implies up to 4 attempts (initial + 3 retries).
     for attempt in range(len(RETRY_BACKOFF_SECONDS) + 1):
-        started = time.monotonic()
         try:
             response = session.app.chat.invoke(
                 app_id=app_id,
@@ -286,6 +305,7 @@ def _run_one_turn(
 
     # Defensive: loop should always return inside, but guard anyway so a
     # future refactor can't silently drop a turn.
+    outcome.response_time_ms = int((time.monotonic() - started) * 1000)
     outcome.error = f"INTERNAL: exhausted retries: {last_error}"[:500]
     return outcome
 

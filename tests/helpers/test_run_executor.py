@@ -223,6 +223,68 @@ def test_execute_run_complete_run_failure_flips_status_to_failed():
     assert "complete_run failed" in result.error_summary
 
 
+def test_response_time_ms_includes_retry_and_backoff_wait(monkeypatch):
+    """response_time_ms should reflect wall-clock turn cost — invoke
+    attempts + retry backoff sleeps — not just the final attempt's
+    duration. Pin this so a future refactor that moves `started` back
+    inside the retry loop trips the test."""
+    # 2-step backoff schedule: 1s then 2s (no jitter so the test is
+    # deterministic). RETRY_BACKOFF_SECONDS in production is (1.0, 2.0,
+    # 4.0); shrinking it here keeps the test fast.
+    monkeypatch.setattr("helpers.run_executor.RETRY_BACKOFF_SECONDS", (1.0, 2.0))
+    monkeypatch.setattr("helpers.run_executor._jittered", lambda base: base)
+
+    # Drive a fake monotonic clock so we don't actually sleep.
+    clock = [0.0]
+    monkeypatch.setattr("helpers.run_executor.time.monotonic", lambda: clock[0])
+    def _fake_sleep(seconds):
+        clock[0] += seconds
+    monkeypatch.setattr("helpers.run_executor.time.sleep", _fake_sleep)
+
+    # Invoke fails twice (retried twice), succeeds on third call.
+    # Each invoke "takes" 0.5s of wall clock, then a backoff sleep, etc.
+    def _flaky_invoke(**kwargs):
+        clock[0] += 0.5
+        if session.app.chat.invoke.call_count < 3:
+            raise Exception("timeout")  # noqa: TRY002 — retriable per classifier
+        return {"answer": "ok", "conversation_id": "c", "message_id": "m"}
+    session = _fake_session([])
+    session.app.chat.invoke.side_effect = _flaky_invoke
+
+    desc = _descriptor(steps=[_step(1, "q")])
+    client = _FakeClient(desc)
+
+    execute_scenario_run(session, client, app_id="app", scenario_id="scn-1")
+
+    # Expected wall-clock: 0.5 + 1.0 + 0.5 + 2.0 + 0.5 = 4.5s = 4500ms.
+    # If `started` was reset inside the loop we'd see just the final
+    # 0.5s = 500ms.
+    recorded_ms = client.recorded_turns[0]["response_time_ms"]
+    assert 4500 <= recorded_ms <= 4700, f"got {recorded_ms}ms, want ~4500ms"
+
+
+def test_init_failure_still_calls_complete_run(monkeypatch):
+    """If anything in the init path (e.g., _deadline_from) raises, the
+    run row must not leak as 'running' — we should call complete_run
+    with status='failed' so the row is closed promptly instead of
+    waiting for the sweeper."""
+    desc = _descriptor(steps=[_step(1, "q")])
+    client = _FakeClient(desc)
+
+    # Force _deadline_from to blow up after descriptor is fetched.
+    def _boom(_descriptor):
+        raise RuntimeError("synthetic init failure")
+    monkeypatch.setattr("helpers.run_executor._deadline_from", _boom)
+
+    result = execute_scenario_run(MagicMock(), client, app_id="app", scenario_id="scn-1")
+
+    assert result.status == "failed"
+    assert "synthetic init failure" in result.error_summary
+    # The Backend was told the run is terminal, not left running.
+    assert len(client.complete_calls) == 1
+    assert client.complete_calls[0]["status"] == "failed"
+
+
 def test_run_result_to_payload_is_stable_json_shape():
     """Tool and Endpoint both yield this exact shape downstream. Pin the
     field set so a future refactor can't quietly add/remove keys."""

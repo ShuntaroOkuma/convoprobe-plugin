@@ -135,6 +135,38 @@ def test_invoke_extracts_target_app_from_raw_string(monkeypatch):
     assert captured["app_id"] == "raw-string-id"
 
 
+def test_invoke_unwraps_python_repr_dict_string_from_app_selector(monkeypatch):
+    """SDK 0.9.0 + Dify Cloud Studio (observed 2026-05-21) sometimes
+    hand the Tool a stringified Python dict for an app-selector slot:
+
+        "{'app_id': 'b91aa0ce-...', 'inputs': {}, 'files': []}"
+
+    Note the single quotes — it's repr(), not JSON. Without unwrap we
+    used to pass the whole string as `app_id`, which Dify daemon
+    silently rejects (no backend call ever hits ConvoProbe). Pin the
+    extraction so a future SDK version reverting to dict doesn't
+    regress."""
+    captured = _patch_executor(monkeypatch, _HAPPY_RESULT)
+    list(_tool()._invoke({
+        "scenario_id": "scn-1",
+        "target_app": "{'app_id': 'b91aa0ce-62aa-41f1-877d-9e785e0d46ec', 'inputs': {}, 'files': []}",
+    }))
+    assert captured["app_id"] == "b91aa0ce-62aa-41f1-877d-9e785e0d46ec"
+
+
+def test_invoke_falls_back_for_malformed_dict_repr_string(monkeypatch):
+    """If literal_eval can't parse the brace-wrapped string (corrupt or
+    not actually a Python literal), fall back to treating it as a raw
+    string app_id. Dify daemon then rejects it cleanly downstream."""
+    captured = _patch_executor(monkeypatch, _HAPPY_RESULT)
+    list(_tool()._invoke({
+        "scenario_id": "scn-1",
+        "target_app": "{not valid python}",
+    }))
+    # Whole malformed string becomes the candidate; upstream rejects it.
+    assert captured["app_id"] == "{not valid python}"
+
+
 def test_invoke_treats_whitespace_only_scenario_id_as_missing(monkeypatch):
     """Users will copy/paste the scenario UUID from the Web UI URL —
     accidentally pasting "  uuid  " or just whitespace should not slip

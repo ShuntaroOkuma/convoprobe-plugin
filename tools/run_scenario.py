@@ -29,6 +29,7 @@ branch — the original implementation is recoverable verbatim).
 """
 from __future__ import annotations
 
+import ast
 from collections.abc import Generator
 from typing import Any
 
@@ -37,6 +38,40 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 
 from helpers.backend_client import BackendClient, BackendClientError
 from helpers.run_executor import execute_scenario_run
+
+
+def _extract_app_id(target_app: Any) -> str:
+    """Coerce whatever Dify hands the Tool for an `app-selector` slot
+    into the underlying app_id.
+
+    Observed shapes (2026-05-21, SDK 0.9.0 on Dify Cloud):
+      - dict: ``{'app_id': '<uuid>', 'inputs': {}, 'files': []}`` —
+        the original shape; pick out app_id.
+      - Python dict repr string: ``"{'app_id': '<uuid>', 'inputs': {}, ...}"``
+        — Dify Studio's workflow runtime serialised the value with
+        ``str()`` somewhere on the way in. ast.literal_eval rebuilds
+        the dict safely (no code execution path; only literals).
+      - bare string: ``"<uuid>"`` — when the slot is fed from a
+        variable or another node.
+      - anything else (None, list, int): treat as missing.
+    """
+    if isinstance(target_app, dict):
+        return target_app.get("app_id") or ""
+    if isinstance(target_app, str):
+        candidate = target_app.strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            try:
+                parsed = ast.literal_eval(candidate)
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, dict):
+                inner = parsed.get("app_id")
+                if isinstance(inner, str) and inner:
+                    return inner
+        # Treat as raw uuid; the upstream invoke will reject it if it
+        # isn't actually a uuid.
+        return candidate
+    return ""
 
 
 class RunScenarioTool(Tool):
@@ -53,18 +88,9 @@ class RunScenarioTool(Tool):
         only `run_id` is T39.3.
         """
         scenario_id = (tool_parameters.get("scenario_id") or "").strip()
-        # `app-selector` returns a dict ({app_id, app_type, ...}) when the
-        # user picks from the dropdown. Inside a workflow the same slot
-        # can be fed by a variable or another node's output, in which
-        # case Dify hands us the raw app_id string. Accept both rather
-        # than silently dropping the latter.
-        target_app = tool_parameters.get("target_app")
-        if isinstance(target_app, dict):
-            app_id = target_app.get("app_id") or ""
-        elif isinstance(target_app, str):
-            app_id = target_app
-        else:
-            app_id = ""
+        # See _extract_app_id docstring for the surprisingly many shapes
+        # Dify Studio hands us for an app-selector slot.
+        app_id = _extract_app_id(tool_parameters.get("target_app"))
 
         if not scenario_id:
             yield self.create_json_message({

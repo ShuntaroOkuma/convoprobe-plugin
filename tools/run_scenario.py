@@ -1,22 +1,31 @@
 """Run Scenario tool — the Tool-plugin entrypoint (PRD v0.2 F1/F4/F5).
 
-Spike scope (T38)
------------------
-This file exists to verify the Tool-plugin scaffolding works end-to-end
-inside Dify Studio:
+Scope
+-----
+Drives a ConvoProbe scenario synchronously inside a Dify workflow node
+and yields the terminal payload (run_id, status, completed_turns,
+transcript_url, ...). The actual run loop lives in
+``helpers.run_executor.execute_scenario_run`` and is shared with the
+existing /run Endpoint so both trigger paths converge on a single
+implementation (ADR-008).
 
-- `_fetch_parameter_options("scenario_id")` is called by Dify when the
-  user opens the scenario dropdown in the node config UI. We exercise the
-  ConvoProbe Backend round-trip so failures surface during the spike,
-  not in production.
-- `_invoke` echoes the chosen parameters as a JSON message. Wiring it to
-  the real scenario-execution path (the existing `/run` endpoint's loop
-  in ``endpoints/run.py``) is T39; doing it here would mix verification
-  with production logic and bloat the spike PR.
+scenario_id as a static input (Dify dynamic-select regression workaround)
+-------------------------------------------------------------------------
+The original design (PRD v0.2 F4, Spike T38) used
+``type: dynamic-select`` for ``scenario_id`` with a
+``_fetch_parameter_options`` hook that called Backend
+``/api/internal/plugin/scenarios``. SDK + manifest were correct and the
+Backend endpoint worked end-to-end via curl, but Dify Cloud Studio's
+Tool-plugin dynamic-select stopped firing in Dify 1.6.0 (regression
+documented in langgenius/dify#22147, still unfixed in 2026-05).
+Symptom: clicking the dropdown produced no network call at all.
 
-The Tool deliberately reuses the same ``BackendClient`` and credential
-schema as the Endpoint flow so we never grow a second authentication
-surface (ADR-008).
+Falling back to a plain text input for ``scenario_id`` keeps the Tool
+usable today. ``BackendClient.list_scenarios()`` is intentionally left
+in place; once Dify ships the dynamic-select fix we flip the YAML back
+to ``type: dynamic-select`` and re-add a ~10-line
+``_fetch_parameter_options`` here (see git log for ``feat/tool-real-run``
+branch — the original implementation is recoverable verbatim).
 """
 from __future__ import annotations
 
@@ -24,7 +33,6 @@ from collections.abc import Generator
 from typing import Any
 
 from dify_plugin import Tool
-from dify_plugin.entities import I18nObject, ParameterOption
 from dify_plugin.entities.tool import ToolInvokeMessage
 
 from helpers.backend_client import BackendClient, BackendClientError
@@ -32,45 +40,6 @@ from helpers.run_executor import execute_scenario_run
 
 
 class RunScenarioTool(Tool):
-    def _fetch_parameter_options(self, parameter: str) -> list[ParameterOption]:
-        """Populate the dynamic dropdown for `scenario_id`.
-
-        Other parameters are not dynamic-select; Dify should not call us
-        for them, but we return [] defensively so an SDK quirk cannot
-        crash the node config UI.
-        """
-        if parameter != "scenario_id":
-            return []
-
-        creds = self.runtime.credentials or {}
-        token = creds.get("convoprobe_api_token") or ""
-        if not token:
-            return []
-        base_url = creds.get("convoprobe_api_base_url") or None
-
-        try:
-            with BackendClient(token=token, base_url=base_url) as client:
-                items = client.list_scenarios()
-        except BackendClientError:
-            # Backend may not yet expose /scenarios (spike phase). Return
-            # an empty list rather than raising — the user will see
-            # "no scenarios" and can investigate via the ConvoProbe Web
-            # UI rather than the tool config panel breaking outright.
-            return []
-
-        # I18nObject in the SDK currently only models en_US/zh_Hans/pt_BR
-        # (see dify_plugin/entities/__init__.py); ja_JP passed here would
-        # be silently dropped by pydantic. Static YAML labels still
-        # support ja_JP, so the rest of the UI remains localized — only
-        # dynamic dropdown rows render in en_US.
-        return [
-            ParameterOption(
-                value=item["id"],
-                label=I18nObject(en_US=item["name"]),
-            )
-            for item in items
-        ]
-
     def _invoke(
         self,
         tool_parameters: dict[str, Any],
@@ -83,7 +52,7 @@ class RunScenarioTool(Tool):
         is currently a no-op (always synchronous) — fast-path returning
         only `run_id` is T39.3.
         """
-        scenario_id = tool_parameters.get("scenario_id") or ""
+        scenario_id = (tool_parameters.get("scenario_id") or "").strip()
         # `app-selector` returns a dict ({app_id, app_type, ...}) when the
         # user picks from the dropdown. Inside a workflow the same slot
         # can be fed by a variable or another node's output, in which
@@ -99,7 +68,10 @@ class RunScenarioTool(Tool):
 
         if not scenario_id:
             yield self.create_json_message({
-                "error": "scenario_id is required (pick one from the dropdown).",
+                "error": (
+                    "scenario_id is required. Paste the UUID from a "
+                    "ConvoProbe Web UI scenario URL."
+                ),
             })
             return
         if not app_id:

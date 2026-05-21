@@ -16,17 +16,25 @@ extra:
     source: tools/run_scenario.py
 
 parameters:
+  # NOTE: scenario_id was originally `type: dynamic-select` with a
+  # _fetch_parameter_options hook in tools/run_scenario.py. Dify Cloud
+  # has a known regression where Tool plugin dynamic-select dropdowns
+  # do not fire (Issue langgenius/dify#22147, reported 2025-07-12 against
+  # 1.6.0, still unfixed in 2026-05). Falling back to a plain text input
+  # so the Tool is usable today. The helper backend client still has
+  # list_scenarios() so we can flip back to dynamic-select with a 1-line
+  # YAML change once Dify ships the fix.
   - name: scenario_id
-    type: dynamic-select
+    type: string
     form: form
     required: true
     label:
-      en_US: Scenario
-      ja_JP: シナリオ
+      en_US: Scenario ID
+      ja_JP: シナリオ ID
     human_description:
-      en_US: Select a scenario you have created in ConvoProbe Web UI.
-      ja_JP: ConvoProbe Web UI で作成済みのシナリオを選択してください。
-    llm_description: ConvoProbe scenario identifier (UUID).
+      en_US: Paste the scenario UUID from ConvoProbe Web UI (open the scenario detail page; the UUID is in the URL).
+      ja_JP: ConvoProbe Web UI でシナリオ詳細ページを開き、URL の UUID をコピーして貼り付けてください。
+    llm_description: ConvoProbe scenario identifier (UUID, e.g. e9223786-230c-430c-a154-ddc40f610851).
   - name: target_app
     type: app-selector
     scope: chat

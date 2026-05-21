@@ -276,12 +276,18 @@ def _run_one_turn(
     # 3-element list implies up to 4 attempts (initial + 3 retries).
     for attempt in range(len(RETRY_BACKOFF_SECONDS) + 1):
         try:
+            # `user` was added to ChatAppInvocation in SDK 0.9.0. Pass a
+            # stable identifier per run so Dify-side conversation
+            # tracking has a consistent owner across turns. Format
+            # matches what verify.py used (architecture §3.3 user
+            # identifier).
             response = session.app.chat.invoke(
                 app_id=app_id,
                 query=user_message,
                 inputs=step_inputs,
                 response_mode="blocking",
                 conversation_id=conversation_id or None,
+                user=f"convoprobe-runner-{app_id[:8]}",
             )
             outcome.response_time_ms = int((time.monotonic() - started) * 1000)
             outcome.bot_response, outcome.conversation_id, outcome.message_id = _extract_dify_response(response)
@@ -291,7 +297,13 @@ def _run_one_turn(
             verdict = classify(e)
             if not verdict.retriable or attempt >= len(RETRY_BACKOFF_SECONDS):
                 outcome.response_time_ms = int((time.monotonic() - started) * 1000)
-                outcome.error = f"{verdict.category.value}: {verdict.message}"[:500]
+                # Tack on a one-line hint for the non-obvious app-type
+                # rejection. Web UI surfaces this error_summary directly
+                # so a user staring at "INVALID_APP_TYPE" can act on it
+                # without diving into docs.
+                hint = _hint_for(verdict.category)
+                base = f"{verdict.category.value}: {verdict.message}"
+                outcome.error = (base + hint)[:500]
                 return outcome
             sleep_s = _jittered(RETRY_BACKOFF_SECONDS[attempt])
             logger.info(
@@ -342,3 +354,27 @@ def _jittered(base: float) -> float:
     """±20% jitter per architecture §7.2. random.uniform is fine — these
     are sleep schedules, not crypto."""
     return base * random.uniform(0.8, 1.2)
+
+
+# Categories that benefit from a fix-it hint in the user-visible error.
+# Keep these short and actionable — they're appended verbatim to the
+# error_summary the Web UI shows.
+_HINTS: dict[str, str] = {
+    "INVALID_APP_TYPE": (
+        " Hint: target app must be a Chatbot (Chat App). Workflow and, "
+        "in current Dify Cloud, Chatflow may be rejected by "
+        "session.app.chat.invoke."
+    ),
+    "INVALID_REQUEST": (
+        " Hint: verify the target app is published and that the "
+        "scenario does not require structured inputs the chatbot "
+        "doesn't accept."
+    ),
+}
+
+
+def _hint_for(category: Any) -> str:
+    """Return the actionable hint suffix for a category, or empty
+    string. Accepts either a string or an Enum-with-.value."""
+    key = getattr(category, "value", None) or str(category)
+    return _HINTS.get(key, "")

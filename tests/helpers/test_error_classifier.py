@@ -69,6 +69,47 @@ def test_classify_text_patterns(text: str, expected_category: ErrorCategory, exp
     assert verdict.retriable is expected_retriable
 
 
+@pytest.mark.parametrize(
+    ("text", "expected_category"),
+    [
+        # Real-world Dify daemon reply observed on 2026-05-21 when calling
+        # session.app.chat.invoke against a Chatflow / Workflow target —
+        # the daemon used to accept Chatflow and stopped in some recent
+        # version. Must classify as non-retriable so we don't burn 4x
+        # retries on a permanent error.
+        (
+            'invoke app failed: request failed with status code: 400 '
+            'and respond with: {"code":"invalid_param",'
+            '"message":"unexpected app type","status":400}',
+            ErrorCategory.INVALID_APP_TYPE,
+        ),
+        # A bare invalid_param without "unexpected app type" — e.g. an
+        # unpublished app or inputs schema mismatch — should also be
+        # non-retriable but not the more specific app-type bucket.
+        (
+            'invoke app failed: status 400 {"code":"invalid_param",'
+            '"message":"something else","status":400}',
+            ErrorCategory.INVALID_REQUEST,
+        ),
+    ],
+)
+def test_classify_invalid_param_variants_are_non_retriable(text: str, expected_category: ErrorCategory):
+    verdict = classify(Exception(text))
+    assert verdict.category == expected_category
+    assert verdict.retriable is False, (
+        "invalid_param errors are permanent — retrying just wastes the "
+        "4-attempt budget and slows the workflow down"
+    )
+
+
+def test_unexpected_app_type_takes_precedence_over_invalid_param():
+    """Both substrings appear in the same Dify error body. The classifier
+    must surface the more specific category so the Web UI shows the
+    app-type hint, not the generic invalid_request one."""
+    msg = '{"code":"invalid_param","message":"unexpected app type"}'
+    assert classify(Exception(msg)).category == ErrorCategory.INVALID_APP_TYPE
+
+
 def test_classify_unknown_defaults_to_internal_retriable():
     """Unknown errors should retry — matches §7.1's "default → INTERNAL"."""
     verdict = classify(RuntimeError("something we have never seen"))

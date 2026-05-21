@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-DEFAULT_BASE_URL = "https://convoprobe.vercel.app"
+DEFAULT_BASE_URL = "https://convoprobe-production.up.railway.app"
 
 DEFAULT_HTTP_TIMEOUT_SECONDS = 30.0
 

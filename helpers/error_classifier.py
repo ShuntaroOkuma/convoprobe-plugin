@@ -27,6 +27,17 @@ class ErrorCategory(str, Enum):
     """
 
     INVALID_APP_ID = "INVALID_APP_ID"
+    # Dify rejects the target app type for `session.app.chat.invoke` —
+    # e.g. caller passed a Workflow or (in newer Dify versions) a
+    # Chatflow where only Chatbot is accepted. Surfaces as 400
+    # "unexpected app type" from Dify daemon. User-fixable by choosing
+    # a different app, so non-retriable.
+    INVALID_APP_TYPE = "INVALID_APP_TYPE"
+    # Generic 400 invalid_param from Dify for which the daemon didn't
+    # give us a more specific signal. Could be inputs schema mismatch,
+    # unpublished app, conversation_id format, etc. Non-retriable
+    # because hammering the same bad payload won't help.
+    INVALID_REQUEST = "INVALID_REQUEST"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     BACKEND_TIMEOUT = "BACKEND_TIMEOUT"
     RATE_LIMITED = "RATE_LIMITED"
@@ -55,6 +66,11 @@ class Classification:
 _PATTERNS: tuple[tuple[str, ErrorCategory], ...] = (
     ("app not found", ErrorCategory.INVALID_APP_ID),
     ("invalid app", ErrorCategory.INVALID_APP_ID),
+    # Order matters: "unexpected app type" must match before the
+    # generic "invalid_param" below, since the Dify daemon emits both
+    # in the same response body.
+    ("unexpected app type", ErrorCategory.INVALID_APP_TYPE),
+    ("invalid_param", ErrorCategory.INVALID_REQUEST),
     ("permission denied", ErrorCategory.PERMISSION_DENIED),
     ("not authorized", ErrorCategory.PERMISSION_DENIED),
     ("forbidden", ErrorCategory.PERMISSION_DENIED),
@@ -70,6 +86,8 @@ _PATTERNS: tuple[tuple[str, ErrorCategory], ...] = (
 _NON_RETRIABLE: frozenset[ErrorCategory] = frozenset(
     {
         ErrorCategory.INVALID_APP_ID,
+        ErrorCategory.INVALID_APP_TYPE,
+        ErrorCategory.INVALID_REQUEST,
         ErrorCategory.PERMISSION_DENIED,
         ErrorCategory.AUTH_FAILED,
     }

@@ -28,12 +28,13 @@ settings:
   - name: convoprobe_api_base_url
     type: text-input
     required: false
+    default: https://convoprobe-production.up.railway.app
     label:
       en_US: ConvoProbe API Base URL (advanced)
       ja_JP: ConvoProbe API ベースURL（詳細）
     placeholder:
-      en_US: https://convoprobe.vercel.app
-      ja_JP: https://convoprobe.vercel.app
+      en_US: https://convoprobe-production.up.railway.app
+      ja_JP: https://convoprobe-production.up.railway.app
     help:
       en_US: Defaults to ConvoProbe SaaS. Set only for self-hosted deployments.
       ja_JP: 通常は ConvoProbe SaaS が利用されます。セルフホスト時のみ設定してください。

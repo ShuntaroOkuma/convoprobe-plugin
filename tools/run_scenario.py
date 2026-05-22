@@ -1,102 +1,138 @@
 """Run Scenario tool — the Tool-plugin entrypoint (PRD v0.2 F1/F4/F5).
 
-Spike scope (T38)
------------------
-This file exists to verify the Tool-plugin scaffolding works end-to-end
-inside Dify Studio:
+Scope
+-----
+Drives a ConvoProbe scenario synchronously inside a Dify workflow node
+and yields the terminal payload (run_id, status, completed_turns,
+transcript_url, ...). The actual run loop lives in
+``helpers.run_executor.execute_scenario_run`` and is shared with the
+existing /run Endpoint so both trigger paths converge on a single
+implementation (ADR-008).
 
-- `_fetch_parameter_options("scenario_id")` is called by Dify when the
-  user opens the scenario dropdown in the node config UI. We exercise the
-  ConvoProbe Backend round-trip so failures surface during the spike,
-  not in production.
-- `_invoke` echoes the chosen parameters as a JSON message. Wiring it to
-  the real scenario-execution path (the existing `/run` endpoint's loop
-  in ``endpoints/run.py``) is T39; doing it here would mix verification
-  with production logic and bloat the spike PR.
+scenario_id as a static input (Dify dynamic-select regression workaround)
+-------------------------------------------------------------------------
+The original design (PRD v0.2 F4, Spike T38) used
+``type: dynamic-select`` for ``scenario_id`` with a
+``_fetch_parameter_options`` hook that called Backend
+``/api/internal/plugin/scenarios``. SDK + manifest were correct and the
+Backend endpoint worked end-to-end via curl, but Dify Cloud Studio's
+Tool-plugin dynamic-select stopped firing in Dify 1.6.0 (regression
+documented in langgenius/dify#22147, still unfixed in 2026-05).
+Symptom: clicking the dropdown produced no network call at all.
 
-The Tool deliberately reuses the same ``BackendClient`` and credential
-schema as the Endpoint flow so we never grow a second authentication
-surface (ADR-008).
+Falling back to a plain text input for ``scenario_id`` keeps the Tool
+usable today. ``BackendClient.list_scenarios()`` is intentionally left
+in place; once Dify ships the dynamic-select fix we flip the YAML back
+to ``type: dynamic-select`` and re-add a ~10-line
+``_fetch_parameter_options`` here (see git log for ``feat/tool-real-run``
+branch — the original implementation is recoverable verbatim).
 """
 from __future__ import annotations
 
+import ast
 from collections.abc import Generator
 from typing import Any
 
 from dify_plugin import Tool
-from dify_plugin.entities import I18nObject, ParameterOption
 from dify_plugin.entities.tool import ToolInvokeMessage
 
 from helpers.backend_client import BackendClient, BackendClientError
+from helpers.run_executor import execute_scenario_run
+
+
+def _extract_app_id(target_app: Any) -> str:
+    """Coerce whatever Dify hands the Tool for an `app-selector` slot
+    into the underlying app_id.
+
+    Observed shapes (2026-05-21, SDK 0.9.0 on Dify Cloud):
+      - dict: ``{'app_id': '<uuid>', 'inputs': {}, 'files': []}`` —
+        the original shape; pick out app_id.
+      - Python dict repr string: ``"{'app_id': '<uuid>', 'inputs': {}, ...}"``
+        — Dify Studio's workflow runtime serialised the value with
+        ``str()`` somewhere on the way in. ast.literal_eval rebuilds
+        the dict safely (no code execution path; only literals).
+      - bare string: ``"<uuid>"`` — when the slot is fed from a
+        variable or another node.
+      - anything else (None, list, int): treat as missing.
+    """
+    if isinstance(target_app, dict):
+        return target_app.get("app_id") or ""
+    if isinstance(target_app, str):
+        candidate = target_app.strip()
+        if candidate.startswith("{") and candidate.endswith("}"):
+            try:
+                parsed = ast.literal_eval(candidate)
+            except (ValueError, SyntaxError):
+                parsed = None
+            if isinstance(parsed, dict):
+                inner = parsed.get("app_id")
+                if isinstance(inner, str) and inner:
+                    return inner
+        # Treat as raw uuid; the upstream invoke will reject it if it
+        # isn't actually a uuid.
+        return candidate
+    return ""
 
 
 class RunScenarioTool(Tool):
-    def _fetch_parameter_options(self, parameter: str) -> list[ParameterOption]:
-        """Populate the dynamic dropdown for `scenario_id`.
-
-        Other parameters are not dynamic-select; Dify should not call us
-        for them, but we return [] defensively so an SDK quirk cannot
-        crash the node config UI.
-        """
-        if parameter != "scenario_id":
-            return []
-
-        creds = self.runtime.credentials or {}
-        token = creds.get("convoprobe_api_token") or ""
-        if not token:
-            return []
-        base_url = creds.get("convoprobe_api_base_url") or None
-
-        try:
-            with BackendClient(token=token, base_url=base_url) as client:
-                items = client.list_scenarios()
-        except BackendClientError:
-            # Backend may not yet expose /scenarios (spike phase). Return
-            # an empty list rather than raising — the user will see
-            # "no scenarios" and can investigate via the ConvoProbe Web
-            # UI rather than the tool config panel breaking outright.
-            return []
-
-        # I18nObject in the SDK currently only models en_US/zh_Hans/pt_BR
-        # (see dify_plugin/entities/__init__.py); ja_JP passed here would
-        # be silently dropped by pydantic. Static YAML labels still
-        # support ja_JP, so the rest of the UI remains localized — only
-        # dynamic dropdown rows render in en_US.
-        return [
-            ParameterOption(
-                value=item["id"],
-                label=I18nObject(en_US=item["name"]),
-            )
-            for item in items
-        ]
-
     def _invoke(
         self,
         tool_parameters: dict[str, Any],
     ) -> Generator[ToolInvokeMessage, None, None]:
-        """Spike implementation: echo parameters so the node integration is
-        verifiable in Dify Studio without depending on the (yet-to-be-built)
-        Tool→Endpoint reuse path. Replaced by the real run loop in T39.
-        """
-        scenario_id = tool_parameters.get("scenario_id") or ""
-        # `app-selector` returns a dict ({app_id, app_type, ...}) when the
-        # user picks from the dropdown. Inside a workflow the same slot
-        # can be fed by a variable or another node's output, in which
-        # case Dify hands us the raw app_id string. Accept both rather
-        # than silently dropping the latter.
-        target_app = tool_parameters.get("target_app")
-        if isinstance(target_app, dict):
-            app_id = target_app.get("app_id") or ""
-        elif isinstance(target_app, str):
-            app_id = target_app
-        else:
-            app_id = ""
-        wait_for_completion = bool(tool_parameters.get("wait_for_completion", True))
+        """Drive a scenario synchronously and return the terminal payload.
 
-        yield self.create_json_message({
-            "spike": True,
-            "note": "Tool wired; actual run execution lands in T39",
-            "scenario_id": scenario_id,
-            "target_app_id": app_id,
-            "wait_for_completion": wait_for_completion,
-        })
+        Shares `helpers.run_executor.execute_scenario_run` with the
+        existing /run Endpoint so Tool callers and curl/HTTP-node
+        callers see exactly the same shape. `wait_for_completion=False`
+        is currently a no-op (always synchronous) — fast-path returning
+        only `run_id` is T39.3.
+        """
+        scenario_id = (tool_parameters.get("scenario_id") or "").strip()
+        # See _extract_app_id docstring for the surprisingly many shapes
+        # Dify Studio hands us for an app-selector slot.
+        app_id = _extract_app_id(tool_parameters.get("target_app"))
+
+        if not scenario_id:
+            yield self.create_json_message({
+                "error": (
+                    "scenario_id is required. Paste the UUID from a "
+                    "ConvoProbe Web UI scenario URL."
+                ),
+            })
+            return
+        if not app_id:
+            yield self.create_json_message({
+                "error": "target_app is required (pick a Dify chatbot from the selector).",
+            })
+            return
+
+        creds = self.runtime.credentials or {}
+        token = creds.get("convoprobe_api_token") or ""
+        base_url = creds.get("convoprobe_api_base_url") or None
+        if not token:
+            yield self.create_json_message({
+                "error": "ConvoProbe API token missing from plugin credentials.",
+            })
+            return
+
+        try:
+            with BackendClient(token=token, base_url=base_url) as client:
+                result = execute_scenario_run(
+                    self.session,
+                    client,
+                    app_id=app_id,
+                    scenario_id=scenario_id,
+                )
+        except BackendClientError as e:
+            # create_run failed (auth / scenario not found / network).
+            # Surface as a structured error message rather than raising —
+            # Dify Studio shows yielded JSON inline in the workflow run
+            # panel, exceptions get wrapped in the noisy PluginInvokeError
+            # envelope.
+            yield self.create_json_message({
+                "error": f"Backend rejected create_run: {e}",
+                "status_code": e.status,
+            })
+            return
+
+        yield self.create_json_message(result.to_payload())

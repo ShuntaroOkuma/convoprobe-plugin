@@ -49,6 +49,12 @@ make lint       # ruff
 make package    # build .difypkg for Marketplace submission
 ```
 
+## Source & Contact
+
+- Repository: https://github.com/ShuntaroOkuma/convoprobe-plugin
+- Issues: https://github.com/ShuntaroOkuma/convoprobe-plugin/issues
+- Author: soitto (Shuntaro Okuma) — shuntaro.okuma@soitto.jp
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -1,5 +1,5 @@
 identity:
-  author: shuntaro-okuma
+  author: soitto
   name: convoprobe
   description:
     en_US: Multi-turn chatbot QA testing for Dify chatbots.

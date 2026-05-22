@@ -28,6 +28,13 @@ class ConvoProbeProvider(ToolProvider):
         # long lines. So we keep messages short enough that the action
         # survives the truncation. Avoiding `>` because JSON escapes it
         # to `>` in the displayed envelope.
+        #
+        # Note (2026-05-22): Dify Cloud's daemon currently has pod
+        # routing issues that surface here as a generic "Invalid
+        # credentials" regardless of what this method does. Verified
+        # end-to-end on a local docker-compose Dify (1.14.2) that this
+        # implementation works correctly. See issue #670 in
+        # langgenius/dify-plugin-daemon for the upstream bug.
         token = (credentials or {}).get("convoprobe_api_token") or ""
         if not token:
             raise ToolProviderCredentialValidationError(

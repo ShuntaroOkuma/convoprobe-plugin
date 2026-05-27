@@ -169,7 +169,20 @@ def _run_scenario_sync(
     error_summary = ""
 
     try:
-        conversation_id = ""
+        # WORKAROUND (langgenius/dify get_user dedup bug, filed 2026-05-27):
+        # Reverse Invocation always creates a fresh EndUser per call, so
+        # the conversation_id returned by turn 1 cannot be looked up on
+        # turn 2 (ConversationService.get_conversation rejects with
+        # ConversationNotExistsError → empty-message 400). Until the
+        # upstream fix lands we replay prior turns as plain text in `query`
+        # and never send conversation_id, so each turn runs as a new
+        # conversation from Dify's perspective but the LLM still sees the
+        # full history. See helpers/run_executor.py:_compose_query_with_history.
+        # Trade-off: chatflows that depend on Dify-side conversation
+        # variables (sys.conversation_id, conversation memory nodes) will
+        # not behave identically to a real continuation; pure LLM-driven
+        # chats are functionally equivalent.
+        history: list[tuple[str, str]] = []  # list of (user_msg, bot_response) pairs
         deadline = _deadline_from(descriptor)
 
         for step in descriptor.steps:
@@ -178,9 +191,11 @@ def _run_scenario_sync(
                 error_summary = "total run timeout reached before all turns completed"
                 break
 
-            outcome = _run_one_turn(session, app_id, conversation_id, step)
-            if outcome.conversation_id:
-                conversation_id = outcome.conversation_id
+            user_message = step.get("user_message", "")
+            composed_query = _compose_query_with_history(history, user_message)
+            outcome = _run_one_turn(session, app_id, composed_query, step)
+            if not outcome.error:
+                history.append((user_message, outcome.bot_response))
 
             try:
                 client.record_turn(
@@ -250,14 +265,24 @@ def _run_scenario_sync(
 def _run_one_turn(
     session: Any,
     app_id: str,
-    conversation_id: str,
+    composed_query: str,
     step: dict[str, Any],
 ) -> _TurnOutcome:
     """Invoke Dify once with retry. Always returns; failures are stored
     in `outcome.error` so the caller can persist them as a turn record.
+
+    `composed_query` is the user message with any prior-turn history
+    pre-pended (see WORKAROUND note in execute_scenario_run and
+    _compose_query_with_history). Each invocation is intentionally a
+    fresh Dify conversation (conversation_id=None) — the upstream Dify
+    daemon/api combination cannot continue a conversation across turns
+    because the EndUser created for turn N is not deduplicated against
+    the EndUser already attached to the conversation from turn 1
+    (langgenius/dify get_user lookup-vs-create column mismatch). Once
+    the upstream fix lands, revert this back to passing conversation_id
+    and the original user_message.
     """
     outcome = _TurnOutcome()
-    user_message = step.get("user_message", "")
     # Forward-compat: when the Backend's PluginRunStep gains an `inputs`
     # field for chatflows that require structured input variables, we
     # pick it up here without a Plugin code change. `or {}` covers both
@@ -276,17 +301,15 @@ def _run_one_turn(
     # 3-element list implies up to 4 attempts (initial + 3 retries).
     for attempt in range(len(RETRY_BACKOFF_SECONDS) + 1):
         try:
-            # `user` was added to ChatAppInvocation in SDK 0.9.0. Pass a
-            # stable identifier per run so Dify-side conversation
-            # tracking has a consistent owner across turns. Format
-            # matches what verify.py used (architecture §3.3 user
-            # identifier).
+            # `user` was added to ChatAppInvocation in SDK 0.9.0; the
+            # daemon overwrites this with a session-derived id anyway, so
+            # the value is informational only.
             response = session.app.chat.invoke(
                 app_id=app_id,
-                query=user_message,
+                query=composed_query,
                 inputs=step_inputs,
                 response_mode="blocking",
-                conversation_id=conversation_id or None,
+                conversation_id=None,
                 user=f"convoprobe-runner-{app_id[:8]}",
             )
             outcome.response_time_ms = int((time.monotonic() - started) * 1000)
@@ -320,6 +343,34 @@ def _run_one_turn(
     outcome.response_time_ms = int((time.monotonic() - started) * 1000)
     outcome.error = f"INTERNAL: exhausted retries: {last_error}"[:500]
     return outcome
+
+
+def _compose_query_with_history(
+    history: list[tuple[str, str]],
+    new_message: str,
+) -> str:
+    """Build the user `query` passed to session.app.chat.invoke. When
+    `history` is empty (first turn) returns `new_message` unchanged.
+    Otherwise prepends a transcript of prior (user, assistant) exchanges
+    so the LLM sees them despite each turn being a fresh Dify
+    conversation (see WORKAROUND in execute_scenario_run).
+
+    Markdown headers + clear role labels are used so most LLMs reliably
+    treat the prior exchange as context rather than continuation. The
+    structure intentionally mirrors what users see in chat UIs.
+    """
+    if not history:
+        return new_message
+    parts: list[str] = ["## Previous conversation", ""]
+    for prev_user, prev_assistant in history:
+        parts.append(f"**User**: {prev_user}")
+        parts.append("")
+        parts.append(f"**Assistant**: {prev_assistant}")
+        parts.append("")
+    parts.append("## Current message")
+    parts.append("")
+    parts.append(new_message)
+    return "\n".join(parts)
 
 
 def _extract_dify_response(response: Any) -> tuple[str, str, str]:

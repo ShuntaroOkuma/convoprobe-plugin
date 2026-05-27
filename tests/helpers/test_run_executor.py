@@ -131,10 +131,12 @@ def test_execute_run_happy_path_completes_all_turns():
     assert client.complete_calls[0]["completed_turns"] == 2
 
 
-def test_execute_run_threads_conversation_id_across_turns():
-    """conversation_id from turn N flows into the invoke call of turn N+1
-    so the chatbot keeps multi-turn context. This is the core value of
-    the synchronous loop — pin it explicitly."""
+def test_execute_run_replays_history_in_query_instead_of_threading_conversation_id():
+    """WORKAROUND for langgenius/dify get_user bug: each turn is sent as
+    a fresh Dify conversation (conversation_id=None always) and prior
+    turns are replayed inside `query` so the LLM still sees the history.
+    Pin both halves of the contract here so a future revert (when
+    upstream lands the fix) is intentional, not accidental."""
     desc = _descriptor(steps=[_step(1, "q1"), _step(2, "q2")])
     session = _fake_session([
         {"answer": "a1", "conversation_id": "conv-thread", "message_id": "m1"},
@@ -143,8 +145,14 @@ def test_execute_run_threads_conversation_id_across_turns():
     execute_scenario_run(session, _FakeClient(desc), app_id="app", scenario_id="scn-1")
 
     calls = session.app.chat.invoke.call_args_list
+    # Half 1: never thread conversation_id (bug workaround)
     assert calls[0].kwargs["conversation_id"] is None
-    assert calls[1].kwargs["conversation_id"] == "conv-thread"
+    assert calls[1].kwargs["conversation_id"] is None
+    # Half 2: turn 1 sends bare question, turn 2 sends prior exchange + new question
+    assert calls[0].kwargs["query"] == "q1"
+    q2 = calls[1].kwargs["query"]
+    assert "q1" in q2 and "a1" in q2 and "q2" in q2
+    assert q2.endswith("q2")
 
 
 def test_execute_run_marks_failed_when_record_turn_breaks(monkeypatch):

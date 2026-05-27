@@ -1,4 +1,4 @@
-version: 0.0.17
+version: 0.0.18
 type: plugin
 author: soitto
 name: convoprobe
@@ -27,7 +27,7 @@ plugins:
   tools:
     - provider/convoprobe.yaml
 meta:
-  version: 0.0.17
+  version: 0.0.18
   arch:
     - amd64
     - arm64
